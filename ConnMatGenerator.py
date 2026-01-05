@@ -1,7 +1,135 @@
 import csv
 import numpy
+import numpy as np
 from os import path, makedirs
 
+from scipy.stats import vonmises
+
+# AI slop for recurrent connectivity w/ structure
+def gen_ring_conn(n_e, n_i, p_ii, p_ei, p_ie, p_ee, w_mu, w_sd, kappa, output_dir,
+                  i_multiplier=10):
+    '''
+    Generates a connectivity matrix with ring-like tuning structure.
+    
+    Parameters:
+    -----------
+    kappa : float
+        Concentration parameter for Von Mises distribution. 
+        kappa = 0 implies uniform random connectivity (disordered).
+        Higher kappa implies sharper tuning (connections mostly between similar orientations).
+    '''
+    n_t = n_e + n_i
+    total_weights = np.zeros((n_t, n_t))
+
+    # 1. Assign preferred orientations (0 to pi)
+    theta_e = np.linspace(0, np.pi, n_e, endpoint=False)
+    theta_i = np.linspace(0, np.pi, n_i, endpoint=False)
+
+    # Helper to create probability matrices
+    def get_prob_matrix(n_src, n_dest, theta_src, theta_dest, target_p, k):
+        # Calculate circular distance (difference in preferred orientation)
+        # We use meshgrid to get the (dest, src) matrix of differences
+        # Note: Orientation space is usually 0-180 (pi), so we treat the domain as [0, pi]
+        # and wrap differences accordingly.
+        
+        # Grid of orientations
+        T_dest, T_src = np.meshgrid(theta_src, theta_dest)
+        
+        # Circular difference on a domain of [0, pi]
+        # (This is equivalent to 2*angle difference on a 2pi circle)
+        diff = T_dest - T_src
+        
+        # Map difference to [-pi, pi] for Von Mises standard usage (which assumes 2pi domain)
+        # Because our physical domain is 0-pi, we multiply by 2 to stretch it to 0-2pi
+        # for the standard vonmises PDF function.
+        diff_scaled = 2 * diff 
+        
+        if k < 1e-5:
+            # Case: Uniform (Kappa approx 0)
+            return np.full((n_dest, n_src), target_p)
+        else:
+            # Calculate unscaled Von Mises PDF
+            # vonmises.pdf(x, kappa) is defined on [-pi, pi]
+            probs = vonmises.pdf(diff_scaled, k)
+            
+            # Normalize so the average probability equals the target_p
+            # We want mean(probs) * scale_factor = target_p
+            scale_factor = target_p / np.mean(probs)
+            probs = probs * scale_factor
+            
+            # Clip probabilities to [0, 1] to prevent math errors if target_p is high
+            probs = np.clip(probs, 0, 1)
+            
+            return probs
+
+    # 2. Generate probability matrices for each quadrant
+    P_ee = get_prob_matrix(n_e, n_e, theta_e, theta_e, p_ee, kappa)
+    P_ie = get_prob_matrix(n_e, n_i, theta_e, theta_i, p_ie, kappa) # Input from E (cols), Output to I (rows)
+    P_ei = get_prob_matrix(n_i, n_e, theta_i, theta_e, p_ei, kappa) # Input from I, Output to E
+    P_ii = get_prob_matrix(n_i, n_i, theta_i, theta_i, p_ii, kappa)
+
+    # 3. Sample actual connections based on P matrices
+    ee_cons = np.random.rand(n_e, n_e) < P_ee
+    ie_cons = np.random.rand(n_i, n_e) < P_ie
+    ei_cons = np.random.rand(n_e, n_i) < P_ei
+    ii_cons = np.random.rand(n_i, n_i) < P_ii
+    
+    
+
+    # 4. Generate lognormal weights (independent of tuning)
+    ee_vals = np.random.lognormal(w_mu, w_sd, np.sum(ee_cons))
+    ie_vals = np.random.lognormal(w_mu, w_sd, np.sum(ie_cons))
+    ei_vals = np.random.lognormal(w_mu, w_sd, np.sum(ei_cons)) * i_multiplier
+    ii_vals = np.random.lognormal(w_mu, w_sd, np.sum(ii_cons)) * i_multiplier
+
+    # 5. Fill the matrix
+    total_weights[:n_e, :n_e][ee_cons] = ee_vals
+    total_weights[n_e:, :n_e][ie_cons] = ie_vals
+    total_weights[:n_e, n_e:][ei_cons] = ei_vals
+    total_weights[n_e:, n_e:][ii_cons] = ii_vals
+    
+    return total_weights
+
+def gen_recurrent_conn(n_e, n_i, p_ii, p_ei, p_ie, p_ee, w_mu, w_sd, output_dir,
+        i_multiplier=10):
+    '''
+    '''
+    n_t = n_e + n_i
+    total_weights = np.zeros((n_t, n_t))
+
+    # do each quadrant manually I guess
+    # this doesn't guarantee same n_cxns to each cell, like tarek's did.
+    ee_cons = np.random.rand(n_e, n_e) < p_ee
+    ie_cons = np.random.rand(n_i, n_e) < p_ie
+    ei_cons = np.random.rand(n_e, n_i) < p_ei
+    ii_cons = np.random.rand(n_i, n_i) < p_ii
+
+    # get values for those
+    ee_vals = np.random.lognormal(w_mu, w_sd, np.sum(ee_cons))
+    ie_vals = np.random.lognormal(w_mu, w_sd, np.sum(ie_cons))
+    ei_vals = np.random.lognormal(w_mu, w_sd, np.sum(ei_cons)) * i_multiplier
+    ii_vals = np.random.lognormal(w_mu, w_sd, np.sum(ii_cons)) * i_multiplier
+
+    # and set them in the full matrix
+    total_weights[:n_e, :n_e][ee_cons] = ee_vals
+    total_weights[n_e:, :n_e][ie_cons] = ie_vals
+    total_weights[:n_e, n_e:][ei_cons] = ei_vals
+    total_weights[n_e:, n_e:][ii_cons] = ii_vals
+    
+    return total_weights # should probably save to output dir...
+    
+    
+def gen_input_conn(n_inputs, n_targets, prob_conn, w_mu, w_sd): # I think shape here might be opposite of post-pre situation for recurrent
+    '''
+    I think this just needs to be an input/n_target matrix...
+    '''
+    weights = np.zeros((n_inputs, n_targets))
+    cons = np.random.rand(n_inputs, n_targets) < prob_conn
+    w_vals = np.random.lognormal(w_mu, w_sd, np.sum(cons))
+    weights[cons] = w_vals
+    
+    return weights
+    
 
 class ConnectivityMatrixGenerator(object):
 

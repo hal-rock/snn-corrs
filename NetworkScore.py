@@ -145,7 +145,7 @@ class NetworkScoreGenerator(object):
             for i in last_e_spikes:
                 spik.append(neo.SpikeTrain(i, units='ms', t_stop=self.run_time))
             tau = 10 * pq.ms
-            dist = elephant.spike_train_dissimilarity.van_rossum_dist(spik, tau, sort=False)
+            dist = elephant.spike_train_dissimilarity.van_rossum_distance(spik, tau, sort=False)
             print(mean(dist))
             return mean(dist)
 

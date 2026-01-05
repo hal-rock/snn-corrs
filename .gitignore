@@ -1,0 +1,5 @@
+*.npy
+*.png
+*test/
+*.pyc
+Logs/*

@@ -15,12 +15,16 @@ import pickle
 import pandas as pd
 import sklearn
 
+# my new faster functions
+from input_generation import generate_input_spikes
+# connmat contains the connectivity functions
+
 csv.field_size_limit(2**30)
 
 
 class NetworkSimulator(object):
 
-    def __init__(self, p_log_path, p_log_level, simulation_time):
+    def __init__(self, p_log_path, p_log_level, simulation_time, Vsi=-75):
 
         # Initiate logger
         self.logger = logging.getLogger(__name__)
@@ -30,6 +34,9 @@ class NetworkSimulator(object):
         # Define conn_mat and network
         self.conn_mat = None
         self.network = None
+
+        # hack for sweeping thru inhibitory reversal potential
+        self.Vsi = Vsi * mV
 
         self.simulation_time = simulation_time
 
@@ -118,7 +125,7 @@ class NetworkSimulator(object):
             self.Vr = -70.6 * mV
             self.VT = -50.4 * mV
             self.Vse = 0 * mV
-            self.Vsi = -75 * mV
+            #self.Vsi = -75 * mV
             self.DeltaT = 2 * mV
             self.Vcut = self.VT + 5 * self.DeltaT
             self.taue = 10 * ms
@@ -276,13 +283,13 @@ class NetworkSimulator(object):
 
 
 def run_sims(ii_p, ie_p, ei_p, ee_p, n_excite, n_inhib, directory_name, num_sims_per, poisson_input_loc,
-             n_input, input_length, w_mu, w_sd, simulation_time):
+             n_input, input_length, w_mu, w_sd, simulation_time, Vsi=-75):
     try:
         n_neurons = n_excite + n_inhib
 
         start = time.time()
 
-        engine = NetworkSimulator('Logs/current_log.log', 'DEBUG', simulation_time)
+        engine = NetworkSimulator('Logs/current_log.log', 'DEBUG', simulation_time, Vsi=vsi)
         engine.logger.info('Generating connectivity matrix...' + str(ee_p) + '/' + str(ei_p) + '/' + str(ie_p) + '/' +
                            str(ii_p) + '/' + str(n_neurons))
 
@@ -299,7 +306,7 @@ def run_sims(ii_p, ie_p, ei_p, ee_p, n_excite, n_inhib, directory_name, num_sims
             engine.logger.info('RUNNING SIMULATION...')
 
             result = engine.run_simulation(n_input, directory_name + '/weight_mat.csv',
-                                           directory_name, poisson_input_loc, str(i), n_neurons)
+                                           directory_name, poisson_input_loc[i], str(i), n_neurons)
 
             if not result:
                 raise Exception('Failed to run simulation.')
@@ -314,35 +321,35 @@ def run_sims(ii_p, ie_p, ei_p, ee_p, n_excite, n_inhib, directory_name, num_sims
                                                           simulation_time*1000, input_length*1000, .1,
                                                           directory_name + '/scoring.csv', num_intervals=5)
 
-            ret = network_scorer.run_scores()
-            print(ret)
-            synch = network_scorer.run_synch_scores()
-            print(synch)
-            if input_length != 0:
-                if ret[2] > 1040:
-                    with open('brief_input_classifier/SVM_PT_scaler_with_sklearn_0.22.1.pkl', 'rb') as scl:
-                        scl_loaded =pickle.load(scl)
-                    with open('brief_input_classifier/SVM_classifier_with_sklearn_0.22.1.pkl', 'rb') as fid:
-                        clf_loaded = pickle.load(fid)
-                    X_test = pd.DataFrame([[ret[0], ret[1], synch[0]]], columns=['e_fr', 'i_fr', 'synch'])
-                    X_test_scaled = scl_loaded.transform(X_test)
-                    X_test_scaled = pd.DataFrame(X_test_scaled, columns=['e_fr_scaled', 'i_fr_scaled', 'synch_scaled'])
-                    y_predict = clf_loaded.predict(X_test_scaled)
-                    print('classification done')
-                    if y_predict == 0:
-                        ret[2] = 0
-            print(ret[2])
+            # ret = network_scorer.run_scores()
+            # print(ret)
+            # synch = network_scorer.run_synch_scores()
+            # print(synch)
+            # if input_length != 0:
+            #     if ret[2] > 1040:
+            #         with open('brief_input_classifier/SVM_PT_scaler_with_sklearn_0.22.1.pkl', 'rb') as scl:
+            #             scl_loaded =pickle.load(scl)
+            #         with open('brief_input_classifier/SVM_classifier_with_sklearn_0.22.1.pkl', 'rb') as fid:
+            #             clf_loaded = pickle.load(fid)
+            #         X_test = pd.DataFrame([[ret[0], ret[1], synch[0]]], columns=['e_fr', 'i_fr', 'synch'])
+            #         X_test_scaled = scl_loaded.transform(X_test)
+            #         X_test_scaled = pd.DataFrame(X_test_scaled, columns=['e_fr_scaled', 'i_fr_scaled', 'synch_scaled'])
+            #         y_predict = clf_loaded.predict(X_test_scaled)
+            #         print('classification done')
+            #         if y_predict == 0:
+            #             ret[2] = 0
+            # print(ret[2])
 
-            with open(directory_name + '/scoring.csv', 'a') as f:
-                writerf = csv.writer(f, delimiter=',')
-                writerf.writerow(ret+synch)
+            # with open(directory_name + '/scoring.csv', 'a') as f:
+            #     writerf = csv.writer(f, delimiter=',')
+            #     writerf.writerow(ret+synch)
 
             end = time.time()
             print(end - start)
 
             engine.logger.info('Done')
 
-        return ret + synch
+        return 0 #ret + synch
 
     except Exception as e:
         engine.logger.error(e)
@@ -410,7 +417,7 @@ if __name__ == '__main__':
     try:
 
         num_trials = 1  # using different conn mat + may or may not use different input for each conn mat
-        num_sims_per = 5  # using different initial voltages for each conn mat
+        num_sims_per = 100  # using different initial voltages for each conn mat
         n_excite = 4000
         n_inhib = 1000
 
@@ -418,12 +425,18 @@ if __name__ == '__main__':
         n_target = n_excite + n_inhib
         input_time = 0.300
 
-        pei_w_multiplier = [1]
-        pei_p = [0.100]
-        p_ee = numpy.arange(0.10, 0.30 + 0.02, 0.02)
-        p_ei = numpy.arange(0.10, 0.30 + 0.02, 0.02)
-        p_ie = numpy.arange(0.10, 0.30 + 0.02, 0.02)
-        p_ii = numpy.linspace(0.20, 0.40, 11)
+        pei_w_multiplier = 1
+        pei_p = 0.100
+        # individual connectivity values from 
+        ee_p = 0.28
+        ei_p = 0.28
+        ie_p = 0.24
+        ii_p = 0.2
+        # ranges searched over in tarek's example script
+        # p_ee = numpy.arange(0.10, 0.30 + 0.02, 0.02)
+        # p_ei = numpy.arange(0.10, 0.30 + 0.02, 0.02)
+        # p_ie = numpy.arange(0.10, 0.30 + 0.02, 0.02)
+        # p_ii = numpy.linspace(0.20, 0.40, 11)
 
         w_mu = -0.64
         w_sd = 0.51
@@ -431,68 +444,65 @@ if __name__ == '__main__':
         rate_mean = 2.8
         rate_std = 0.3
 
-        score = numpy.zeros((len(pei_w_multiplier) * len(pei_p) * len(p_ee) * len(p_ei) * len(p_ie) * len(p_ii) * num_trials * num_sims_per, 11))
+        score = numpy.zeros((num_trials * num_sims_per, 11))
         count = -1
 
         simulation_time = 1.05
-        engine = NetworkSimulator('Logs/current_log.log', 'DEBUG', simulation_time)
+        # engine line taken from here
+        engine = NetworkSimulator('Logs/current_log.log', 'DEBUG', simulation_time) # seemingly not actually used?
 
-        for p in pei_p:
-            for m in pei_w_multiplier:
+        input_dictionary = {}
+        for n in range(0, num_sims_per): # modified to be per-sim rather than per-trial. I believe this regenerates the ratrse/co
+            print("Generating Poisson Input")
+            poisson_input_loc = 'output/poisson_inputs_' + str(n) + '.csv'
+            poisson_generator = poisson.PoissonInputGenerator(n_input, n_target, n_excite + n_inhib, pei_p,
+                                                                rate_mean, rate_std, input_time,
+                                                                poisson_input_loc, pei_w_multiplier, cyclical=False)
+            input_dictionary[n] = poisson_generator.generate_inputs()
 
-                input_dictionary = {}
-                for n in range(0, num_trials):
-                    print("Generating Poisson Input")
-                    poisson_input_loc = 'output/poisson_inputs_' + str(n) + '.csv'
-                    poisson_generator = poisson.PoissonInputGenerator(n_input, n_target, n_excite + n_inhib, p,
-                                                                      rate_mean, rate_std, input_time,
-                                                                      poisson_input_loc, m, cyclical=False)
-                    input_dictionary[n] = poisson_generator.generate_inputs()
+        # Can also use saved inputs e.g.
+        # input_dictionary = np.load('Inputs/sample_brief.npy', allow_pickle=True).item()
 
-                # Can also use saved inputs e.g.
-                # input_dictionary = np.load('Inputs/sample_brief.npy', allow_pickle=True).item()
+        # directory_name = 'grid_search_random_brief_input/pee_' + str(round(ee_p, 4)) +\
+        #                     '_pei_' + str(round(ei_p, 4)) + '_pie_' + str(round(ie_p, 4)) +\
+        #                     '_pii_' + str(round(ii_p, 4)) + '_simulation_time_' +\
+        #                     str(simulation_time)
 
-                for ee_p in p_ee:
-                    for ei_p in p_ei:
-                        for ie_p in p_ie:
-                            for ii_p in p_ii:
+        vsis = np.arange(-90, -65, 2)
+        for vsi in vsis:
+            directory_name = f'default_test/vsi{vsi}'
 
-                                directory_name = 'grid_search_random_short_input/pee_' + str(round(ee_p, 4)) +\
-                                                 '_pei_' + str(round(ei_p, 4)) + '_pie_' + str(round(ie_p, 4)) +\
-                                                 '_pii_' + str(round(ii_p, 4)) + '_simulation_time_' +\
-                                                 str(simulation_time)
+            if not os.path.exists(directory_name):
+                os.makedirs(directory_name)
 
-                                if not os.path.exists(directory_name):
-                                    os.mkdir(directory_name)
+            # To use different inputs for each parameter combination, generate them here
 
-                                # To use different inputs for each parameter combination, generate them here
+            for i in range(0, num_trials):
+                results = run_sims(ii_p, ie_p, ei_p, ee_p, n_excite, n_inhib, directory_name,
+                                    num_sims_per, input_dictionary, n_input, input_time,
+                                    w_mu, w_sd, simulation_time, Vsi=vsi)
 
-                                for i in range(0, num_trials):
-                                    results = run_sims(ii_p, ie_p, ei_p, ee_p, n_excite, n_inhib, directory_name,
-                                                       num_sims_per, input_dictionary[i], n_input, input_time,
-                                                       w_mu, w_sd, simulation_time)
+        #     with open(directory_name + '/scoring.csv', 'r', newline='') as f:
+        #         read_f = csv.reader(f, delimiter=',', quoting=csv.QUOTE_NONNUMERIC)
+        #         for j in range(0, num_sims_per):
+        #             count += 1
+        #             line = next(read_f)
+        #             score[count][0] = line[0]
+        #             score[count][1] = line[1]
+        #             score[count][2] = line[2]
+        #             score[count][3] = line[3]
+        #             score[count][4] = p
+        #             score[count][5] = m
+        #             score[count][6] = ee_p
+        #             score[count][7] = ei_p
+        #             score[count][8] = ie_p
+        #             score[count][9] = ii_p
+        #             score[count][10] = j
+        #             numpy.save('grid_search_random_brief_input/SummaryScores', score)
 
-                                    with open(directory_name + '/scoring.csv', 'r', newline='') as f:
-                                        read_f = csv.reader(f, delimiter=',', quoting=csv.QUOTE_NONNUMERIC)
-                                        for j in range(0, num_sims_per):
-                                            count += 1
-                                            line = next(read_f)
-                                            score[count][0] = line[0]
-                                            score[count][1] = line[1]
-                                            score[count][2] = line[2]
-                                            score[count][3] = line[6]
-                                            score[count][4] = p
-                                            score[count][5] = m
-                                            score[count][6] = ee_p
-                                            score[count][7] = ei_p
-                                            score[count][8] = ie_p
-                                            score[count][9] = ii_p
-                                            score[count][10] = j
-                                            numpy.save('grid_search_random_brief_input/SummaryScores', score)
+        #     shutil.rmtree(directory_name)
 
-                                    shutil.rmtree(directory_name)
-
-        numpy.save('grid_search_random_brief_input/SummaryScores', score)
+        # numpy.save('grid_search_random_brief_input/SummaryScores', score)
 
     except Exception as e:
         print(e)
