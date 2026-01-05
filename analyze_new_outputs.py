@@ -134,6 +134,45 @@ def load_fast(dir, n_trials=100, n_neurons=5000, bin_size=1000): # need n specif
     return bins
 
 
+def load_fast_vectorized(dir, n_trials=100, n_neurons=5000, bin_size=1000,
+                         total_time=1000, start_from=50):
+    """
+    Vectorized loading - O(n_spikes) instead of O(n_neurons * n_spikes) per trial.
+    Goes directly from sparse (idxs, times) to binned matrix without intermediate format.
+    """
+    n_bins = int(np.ceil((total_time - start_from) / bin_size))
+
+    # Pre-allocate output: (neurons, trials * bins)
+    result = np.zeros((n_neurons, n_trials * n_bins), dtype=np.uint8)
+
+    for trial in range(n_trials):
+        data = np.load(f'{dir}/trial{trial}/spike_monitor0.npz')
+        idxs = data['idxs']
+        times = data['times']
+        data.close()
+
+        # Filter to times after start_from
+        mask = times > start_from
+        idxs = idxs[mask]
+        times = times[mask] - start_from
+
+        # Compute bin indices directly
+        bin_indices = np.floor(times / bin_size).astype(np.int32)
+
+        # Filter out-of-range bins
+        valid = (bin_indices >= 0) & (bin_indices < n_bins)
+        idxs = idxs[valid]
+        bin_indices = bin_indices[valid]
+
+        # Offset for this trial's columns
+        col_indices = bin_indices + trial * n_bins
+
+        # Count spikes with unbuffered addition - single pass through data
+        np.add.at(result, (idxs, col_indices), 1)
+
+    return result
+
+
 if __name__ == '__main__':
     vsis = [0]
     bin_size = 1000

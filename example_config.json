@@ -1,0 +1,23 @@
+{
+    "_comment": "Example configuration file for run_sweep.py",
+
+    "_comment2": "Fixed parameters (single values)",
+    "n_excite": 4000,
+    "n_inhib": 1000,
+    "n_input": 3000,
+    "n_trials": 100,
+    "n_stimuli": 3,
+    "simulation_time": 1.05,
+
+    "_comment3": "Sweep parameters - can be specified as:",
+    "_comment4": "  - Single value: 0.5",
+    "_comment5": "  - Comma-separated list: '0.0, 0.5, 1.0, 1.5, 2.0'",
+    "_comment6": "  - Range with step: '0.0:2.0:0.2' (start:stop:step)",
+    "_comment7": "  - Range with N points: '0.0:2.0:11:lin' or '0.1:10:10:log'",
+
+    "kappa": "0.0, 1.0, 2.0",
+    "input_time": "100, 300, 500",
+
+    "_comment8": "Parallelization",
+    "n_workers": 8
+}
