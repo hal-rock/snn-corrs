@@ -2,11 +2,65 @@ import random
 import numpy as np
 from os import path, makedirs
 from scipy import stats
+from scipy.stats import vonmises
 import math
 import multiprocessing
 from functools import partial
 
 N_THREADS = multiprocessing.cpu_count() - 2 # bit of wiggle room
+
+
+def generate_rate_vector(n_inputs, rate_mu, rate_sigma, kappa=0, bump_center=0):
+    '''
+    Generate input firing rates with optional Von Mises spatial structure.
+
+    Base rates are lognormal. When kappa > 0, rates are scaled by a Von Mises
+    distribution centered at bump_center, creating a "bump" of higher activity.
+    Scaling is normalized so the average rate is unchanged.
+
+    Parameters:
+    -----------
+    n_inputs : int
+        Number of input neurons
+    rate_mu : float
+        Mean parameter for lognormal distribution (log-space)
+    rate_sigma : float
+        Standard deviation for lognormal distribution (log-space)
+    kappa : float
+        Concentration parameter for Von Mises scaling.
+        kappa = 0 returns pure lognormal rates (no spatial structure).
+        Higher kappa creates a sharper bump.
+    bump_center : float
+        Center of the activity bump in radians (0 to pi).
+        Represents the "preferred orientation" being stimulated.
+
+    Returns:
+    --------
+    rates : ndarray of shape (n_inputs,)
+        Firing rates in Hz
+    '''
+    # Generate base lognormal rates
+    base_rates = np.random.lognormal(mean=rate_mu, sigma=rate_sigma, size=n_inputs)
+
+    if kappa < 1e-5:
+        # No structure - return pure lognormal
+        return base_rates
+
+    # Assign positions to input neurons (0 to pi)
+    positions = np.linspace(0, np.pi, n_inputs, endpoint=False)
+
+    # Calculate Von Mises scaling factors
+    # Scale position difference to [-pi, pi] for standard Von Mises (domain is 2*pi)
+    diff_scaled = 2 * (positions - bump_center)
+    scaling = vonmises.pdf(diff_scaled, kappa)
+
+    # Normalize scaling so mean = 1 (preserves average rate)
+    scaling = scaling / np.mean(scaling)
+
+    # Apply scaling to base rates
+    rates = base_rates * scaling
+
+    return rates
 
 def generate_trial_spikes(i, rate_vec, input_time):
     '''generate one trial of spikes'''

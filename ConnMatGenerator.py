@@ -127,7 +127,70 @@ def gen_input_conn(n_inputs, n_targets, prob_conn, w_mu, w_sd): # I think shape 
     cons = np.random.rand(n_inputs, n_targets) < prob_conn
     w_vals = np.random.lognormal(w_mu, w_sd, np.sum(cons))
     weights[cons] = w_vals
-    
+
+    return weights
+
+
+def gen_ring_input_conn(n_inputs, n_targets, prob_conn, w_mu, w_sd, kappa):
+    '''
+    Generates input connectivity with ring-like tuning structure.
+
+    Connection probability depends on similarity of preferred orientations
+    between input and target neurons, controlled by kappa parameter.
+
+    Parameters:
+    -----------
+    n_inputs : int
+        Number of input (Poisson) neurons
+    n_targets : int
+        Number of target neurons in the network
+    prob_conn : float
+        Target average connection probability
+    w_mu, w_sd : float
+        Log-normal weight distribution parameters
+    kappa : float
+        Concentration parameter for Von Mises distribution.
+        kappa = 0 implies uniform random connectivity (equivalent to gen_input_conn).
+        Higher kappa implies sharper tuning (connections mostly between similar orientations).
+
+    Returns:
+    --------
+    weights : ndarray of shape (n_inputs, n_targets)
+        Input weight matrix with lognormal weights where connected
+    '''
+    # Assign preferred orientations (0 to pi) to both populations
+    theta_input = np.linspace(0, np.pi, n_inputs, endpoint=False)
+    theta_target = np.linspace(0, np.pi, n_targets, endpoint=False)
+
+    # Calculate connection probability matrix
+    if kappa < 1e-5:
+        # Uniform case (kappa ~ 0)
+        P = np.full((n_inputs, n_targets), prob_conn)
+    else:
+        # Grid of orientations: T_target[i,j] = theta_target[j], T_input[i,j] = theta_input[i]
+        T_target, T_input = np.meshgrid(theta_target, theta_input)
+
+        # Circular difference on domain [0, pi]
+        # Scale by 2 to map to standard Von Mises domain [-pi, pi]
+        diff_scaled = 2 * (T_target - T_input)
+
+        # Von Mises PDF for connection probability
+        P = vonmises.pdf(diff_scaled, kappa)
+
+        # Scale so average probability equals target prob_conn
+        P = P * (prob_conn / np.mean(P))
+
+        # Clip to valid probability range
+        P = np.clip(P, 0, 1)
+
+    # Sample connections based on probability matrix
+    cons = np.random.rand(n_inputs, n_targets) < P
+
+    # Generate lognormal weights for existing connections
+    weights = np.zeros((n_inputs, n_targets))
+    w_vals = np.random.lognormal(w_mu, w_sd, np.sum(cons))
+    weights[cons] = w_vals
+
     return weights
     
 

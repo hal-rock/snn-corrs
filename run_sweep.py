@@ -27,7 +27,7 @@ import numpy as np
 
 # Local imports
 import ConnMatGenerator as connmat
-from input_generation import generate_input_spikes
+from input_generation import generate_input_spikes, generate_rate_vector
 from fastSNN_parallel import run_trials_parallel
 
 
@@ -57,6 +57,8 @@ DEFAULT_CONFIG = {
     "input_time": 300,      # input duration in ms
     "rate_mean": 2.8,       # log-normal rate mean
     "rate_std": 0.3,        # log-normal rate std
+    "input_rate_kappa": 0.0,   # Von Mises kappa for input rate bump (0 = no structure)
+    "input_conn_kappa": 0.0,   # Von Mises kappa for input connectivity structure (0 = random)
 
     # Simulation parameters
     "simulation_time": 1.05,  # total simulation time in seconds
@@ -86,6 +88,8 @@ SWEEPABLE_PARAMS = {
     "i_multiplier": float,
     "rate_mean": float,
     "rate_std": float,
+    "input_rate_kappa": float,
+    "input_conn_kappa": float,
     "simulation_time": float,
     "Vsi": float,
     "n_excite": int,
@@ -201,9 +205,17 @@ def run_single_sweep_point(params, output_dir, run_name):
 
     # Generate connectivity matrices
     print("  Generating connectivity matrices...")
-    input_conn = connmat.gen_input_conn(
-        n_input, n_cells, params['pei_p'], params['w_mu'], params['w_sd']
-    )
+    input_conn_kappa = params.get('input_conn_kappa', 0.0)
+    if input_conn_kappa > 1e-5:
+        input_conn = connmat.gen_ring_input_conn(
+            n_input, n_cells, params['pei_p'], params['w_mu'], params['w_sd'],
+            input_conn_kappa
+        )
+    else:
+        input_conn = connmat.gen_input_conn(
+            n_input, n_cells, params['pei_p'], params['w_mu'], params['w_sd']
+        )
+
     recur_conn = connmat.gen_ring_conn(
         n_excite, n_inhib,
         params['ii_p'], params['ei_p'], params['ie_p'], params['ee_p'],
@@ -220,6 +232,10 @@ def run_single_sweep_point(params, output_dir, run_name):
     with open(f'{output_dir}/params.json', 'w') as f:
         json.dump(params, f, indent=2)
 
+    # Compute bump centers evenly distributed across 0 to pi for each stimulus
+    bump_centers = np.linspace(0, np.pi, n_stimuli, endpoint=False)
+    input_rate_kappa = params.get('input_rate_kappa', 0.0)
+
     # Run each stimulus
     for s in range(n_stimuli):
         print(f"  Stimulus {s+1}/{n_stimuli}")
@@ -227,11 +243,13 @@ def run_single_sweep_point(params, output_dir, run_name):
         stim_dir = f'{output_dir}/stim{s}'
         os.makedirs(stim_dir, exist_ok=True)
 
-        # Generate input rates
-        input_rates = np.random.lognormal(
-            mean=params['rate_mean'],
-            sigma=params['rate_std'],
-            size=n_input
+        # Generate input rates with optional bump structure
+        input_rates = generate_rate_vector(
+            n_input,
+            rate_mu=params['rate_mean'],
+            rate_sigma=params['rate_std'],
+            kappa=input_rate_kappa,
+            bump_center=bump_centers[s]
         )
 
         # Generate input spikes
@@ -239,9 +257,10 @@ def run_single_sweep_point(params, output_dir, run_name):
             input_rates, n_trials, params['input_time'], output_file=None
         )
 
-        # Save input spikes
+        # Save input spikes and rates
         np.savez(f'{stim_dir}/input_times.npz', *inpt_times)
         np.savez(f'{stim_dir}/input_spikes.npz', *inpt_spikes)
+        np.save(f'{stim_dir}/input_rates.npy', input_rates)
 
         # Run trials in parallel
         results = run_trials_parallel(
@@ -257,7 +276,7 @@ def run_single_sweep_point(params, output_dir, run_name):
             Vsi=params['Vsi']
         )
 
-        successful = sum(1 for _, success in results if success)
+        successful = sum(1 for _, success, _ in results if success)
         print(f"    Completed {successful}/{n_trials} trials")
 
 

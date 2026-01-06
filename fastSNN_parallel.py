@@ -5,12 +5,13 @@ Runs multiple independent simulations across CPU cores.
 from brian2 import *
 import numpy as np
 import os
+import shutil
 import time
 import multiprocessing as mp
 from functools import partial
 
 # Local imports
-from input_generation import generate_input_spikes
+from input_generation import generate_input_spikes, generate_rate_vector
 import ConnMatGenerator as connmat
 
 
@@ -44,6 +45,8 @@ def run_single_trial(trial_args, config):
     if not hasattr(run_single_trial, '_device_set'):
         set_device('cpp_standalone', directory=standalone_dir, build_on_run=True)
         run_single_trial._device_set = True
+    #set_device('cpp_standalone', directory=standalone_dir)#, build_on_run=True)
+    #run_single_trial._device_set = True
 
     try:
         # Build and run the network
@@ -63,7 +66,7 @@ def run_single_trial(trial_args, config):
         device.reinit()
         device.activate(directory=standalone_dir, build_on_run=True)
 
-        return (trial_id, result)
+        return (trial_id, result, pid)
 
     except Exception as e:
         print(f"Trial {trial_id} failed: {e}")
@@ -71,7 +74,7 @@ def run_single_trial(trial_args, config):
         traceback.print_exc()
         device.reinit()
         device.activate(directory=standalone_dir, build_on_run=True)
-        return (trial_id, False)
+        return (trial_id, False, pid)
 
 
 def _build_and_run_network(input_conn, recur_conn, inputs, n_excite, n_inhib,
@@ -232,8 +235,14 @@ def run_trials_parallel(input_conn, recur_conn, input_times_list, input_spikes_l
     with mp.Pool(processes=n_workers) as pool:
         results = pool.map(worker_fn, trial_args)
 
+    # cleanup temp directories
+    pids = np.unique([r[2] for r in results])
+    for pid in pids:
+        dir_name = f'/tmp/brian_standalone_{pid}'
+        shutil.rmtree(dir_name)
+
     elapsed = time.time() - start_time
-    successful = sum(1 for _, success in results if success)
+    successful = sum(1 for _, success, _ in results if success)
     print(f"Completed {successful}/{n_trials} trials in {elapsed:.1f}s "
           f"({elapsed/n_trials:.2f}s per trial, {n_trials/elapsed:.1f} trials/s)")
 
@@ -314,13 +323,23 @@ if __name__ == '__main__':
     simulation_time = 1.05
     n_stimuli = 3
 
+    # Input structure parameters
+    input_rate_kappa = 0.0   # Von Mises kappa for input rate bump (0 = no structure)
+    input_conn_kappa = 0.0   # Von Mises kappa for input connectivity (0 = random)
+
     # Number of parallel workers (set to number of CPU cores, or less if memory constrained)
     n_workers = min(mp.cpu_count(), 16)  # cap at 16 to avoid memory issues
 
     print(f"Using {n_workers} parallel workers")
 
     # Generate input connectivity (shared across all runs)
-    input_conn = connmat.gen_input_conn(n_input, n_cells, pei_p, w_mu, w_sd)
+    if input_conn_kappa > 1e-5:
+        input_conn = connmat.gen_ring_input_conn(n_input, n_cells, pei_p, w_mu, w_sd, input_conn_kappa)
+    else:
+        input_conn = connmat.gen_input_conn(n_input, n_cells, pei_p, w_mu, w_sd)
+
+    # Compute bump centers evenly distributed across 0 to pi for each stimulus
+    bump_centers = np.linspace(0, np.pi, n_stimuli, endpoint=False)
 
     # Parameter sweep
     for input_time in np.arange(0.1, 1.1, 0.1):
@@ -343,8 +362,14 @@ if __name__ == '__main__':
             for s in range(n_stimuli):
                 print(f"\nStimulus {s}/{n_stimuli}")
 
-                # Generate input rates for this stimulus
-                input_rates = np.random.lognormal(mean=rate_mean, sigma=rate_std, size=n_input)
+                # Generate input rates with optional bump structure
+                input_rates = generate_rate_vector(
+                    n_input,
+                    rate_mu=rate_mean,
+                    rate_sigma=rate_std,
+                    kappa=input_rate_kappa,
+                    bump_center=bump_centers[s]
+                )
 
                 # Run all trials for this stimulus in parallel
                 stim_dir = f'{save_dir}/stim{s}'
