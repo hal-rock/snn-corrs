@@ -13,6 +13,9 @@ Usage:
 
     # Combine config file with overrides
     python run_sweep.py --config base.json --n_trials 50
+
+    # Multiple runs with different network initializations
+    python run_sweep.py --runs 5 --kappa 1.0
 """
 import argparse
 import json
@@ -28,7 +31,8 @@ import numpy as np
 # Local imports
 import ConnMatGenerator as connmat
 from input_generation import generate_input_spikes, generate_rate_vector
-from fastSNN_parallel import run_trials_parallel
+# Use fastSNN_fastparallel for runtime mode (faster than standalone with recompilation)
+from fastSNN_fastparallel import run_trials_parallel
 
 
 # Default configuration - all parameters with their default values
@@ -50,7 +54,9 @@ DEFAULT_CONFIG = {
     "w_sd": 0.51,
 
     # Network structure
-    "kappa": 0.0,           # ring connectivity parameter
+    "kappa": 0.0,           # ring connectivity parameter (used if kappa_e/kappa_i not set)
+    "kappa_e": None,        # kappa for connections FROM E cells (EE, IE); None = use kappa
+    "kappa_i": None,        # kappa for connections FROM I cells (II, EI); None = use kappa
     "i_multiplier": 10,     # inhibitory weight multiplier
 
     # Input parameters
@@ -64,6 +70,7 @@ DEFAULT_CONFIG = {
     "simulation_time": 1.05,  # total simulation time in seconds
     "n_trials": 200,          # number of trials per stimulus
     "n_stimuli": 3,           # number of different stimuli
+    "runs": 1,                # number of independent runs (different network initializations)
 
     # Neuron parameters
     "Vsi": -75,  # inhibitory reversal potential (mV)
@@ -75,6 +82,8 @@ DEFAULT_CONFIG = {
 # Parameters that can be swept (with their types for parsing)
 SWEEPABLE_PARAMS = {
     "kappa": float,
+    "kappa_e": float,
+    "kappa_i": float,
     "input_time": float,
     "n_trials": int,
     "n_stimuli": int,
@@ -221,7 +230,9 @@ def run_single_sweep_point(params, output_dir, run_name):
         params['ii_p'], params['ei_p'], params['ie_p'], params['ee_p'],
         params['w_mu'], params['w_sd'],
         params['kappa'], None,
-        i_multiplier=params['i_multiplier']
+        i_multiplier=params['i_multiplier'],
+        kappa_e=params.get('kappa_e'),
+        kappa_i=params.get('kappa_i')
     )
 
     # Save connectivity
@@ -304,6 +315,9 @@ Examples:
   # Multiple sweeps (creates grid)
   python run_sweep.py --kappa 0.0,1.0,2.0 --input_time 100,300,500
 
+  # Multiple runs with different network initializations
+  python run_sweep.py --runs 5 --kappa 1.0
+
   # Override specific parameters
   python run_sweep.py --n_trials 50 --n_workers 8
         """
@@ -318,6 +332,8 @@ Examples:
                         help='Print config and sweep combinations without running')
     parser.add_argument('--n_workers', type=int, default=None,
                         help='Number of parallel workers (default: all CPUs)')
+    parser.add_argument('--runs', type=int, default=None,
+                        help='Number of independent runs with different network initializations (default: 1)')
 
     # Add arguments for all sweepable parameters
     for param, ptype in SWEEPABLE_PARAMS.items():
@@ -349,6 +365,11 @@ Examples:
     if args.n_workers is not None:
         config['n_workers'] = args.n_workers
 
+    # Handle runs parameter
+    if args.runs is not None:
+        config['runs'] = args.runs
+    n_runs = config.get('runs', 1)
+
     # Generate sweep combinations
     combinations = generate_sweep_combinations(config)
 
@@ -359,6 +380,7 @@ Examples:
     print(f"Run name: {run_name}")
     print(f"Output directory: {base_output_dir}")
     print(f"Number of parameter combinations: {len(combinations)}")
+    print(f"Number of runs per combination: {n_runs}")
 
     if args.dry_run:
         print("\n--- DRY RUN ---")
@@ -384,6 +406,7 @@ Examples:
         'created': datetime.now().isoformat(),
         'base_config': {k: v for k, v in config.items()},
         'n_combinations': len(combinations),
+        'n_runs': n_runs,
         'sweep_parameters': [name for name, val in config.items()
                             if isinstance(val, list) or
                             (isinstance(val, str) and (':' in val or ',' in val))],
@@ -394,20 +417,28 @@ Examples:
     print(f"\nSaved master config to {base_output_dir / 'config.json'}")
 
     # Run each combination
+    total_runs = len(combinations) * n_runs
+    run_counter = 0
     for i, (params, path_parts) in enumerate(combinations):
-        print(f"\n{'='*60}")
-        print(f"Combination {i+1}/{len(combinations)}")
-        if path_parts:
-            print(f"Parameters: {', '.join(path_parts)}")
-        print('='*60)
+        for run_idx in range(n_runs):
+            run_counter += 1
+            print(f"\n{'='*60}")
+            print(f"Run {run_counter}/{total_runs} (Combination {i+1}/{len(combinations)}, Run {run_idx+1}/{n_runs})")
+            if path_parts:
+                print(f"Parameters: {', '.join(path_parts)}")
+            print('='*60)
 
-        # Build output path
-        if path_parts:
-            combo_output_dir = base_output_dir / '/'.join(path_parts)
-        else:
-            combo_output_dir = base_output_dir
+            # Build output path
+            if path_parts:
+                combo_output_dir = base_output_dir / '/'.join(path_parts)
+            else:
+                combo_output_dir = base_output_dir
 
-        run_single_sweep_point(params, str(combo_output_dir), run_name)
+            # Add run subdirectory if multiple runs
+            if n_runs > 1:
+                combo_output_dir = combo_output_dir / f'run{run_idx}'
+
+            run_single_sweep_point(params, str(combo_output_dir), run_name)
 
     print(f"\n{'='*60}")
     print(f"Sweep complete! Results saved to: {base_output_dir}")

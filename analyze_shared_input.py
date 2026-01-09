@@ -152,7 +152,8 @@ def main():
 
     print("Loading parameters and connectivity...")
     params = load_params(data_dir)
-    params['n_stimuli'] = 1 # 
+    # just analyze the first stimulus since we are interested in single-stim corrs
+    params['n_stimuli'] = 1
     input_conn, recurrent_conn = load_connectivity(data_dir)
     # need to adjust for diff synapse timescales of inhibition
     e_to_i_ratio = 2/(3.3 * 2.26) # roughly

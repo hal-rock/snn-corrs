@@ -7,17 +7,28 @@ from scipy.stats import vonmises
 
 # AI slop for recurrent connectivity w/ structure
 def gen_ring_conn(n_e, n_i, p_ii, p_ei, p_ie, p_ee, w_mu, w_sd, kappa, output_dir,
-                  i_multiplier=10):
+                  i_multiplier=10, kappa_e=None, kappa_i=None):
     '''
     Generates a connectivity matrix with ring-like tuning structure.
-    
+
     Parameters:
     -----------
     kappa : float
-        Concentration parameter for Von Mises distribution. 
+        Concentration parameter for Von Mises distribution (used if kappa_e/kappa_i not specified).
         kappa = 0 implies uniform random connectivity (disordered).
         Higher kappa implies sharper tuning (connections mostly between similar orientations).
+    kappa_e : float, optional
+        Kappa for connections FROM excitatory cells (EE and IE connections).
+        If None, uses the value of kappa.
+    kappa_i : float, optional
+        Kappa for connections FROM inhibitory cells (II and EI connections).
+        If None, uses the value of kappa.
     '''
+    # Handle backward compatibility: if kappa_e/kappa_i not specified, use kappa
+    if kappa_e is None:
+        kappa_e = kappa
+    if kappa_i is None:
+        kappa_i = kappa
     n_t = n_e + n_i
     total_weights = np.zeros((n_t, n_t))
 
@@ -63,10 +74,11 @@ def gen_ring_conn(n_e, n_i, p_ii, p_ei, p_ie, p_ee, w_mu, w_sd, kappa, output_di
             return probs
 
     # 2. Generate probability matrices for each quadrant
-    P_ee = get_prob_matrix(n_e, n_e, theta_e, theta_e, p_ee, kappa)
-    P_ie = get_prob_matrix(n_e, n_i, theta_e, theta_i, p_ie, kappa) # Input from E (cols), Output to I (rows)
-    P_ei = get_prob_matrix(n_i, n_e, theta_i, theta_e, p_ei, kappa) # Input from I, Output to E
-    P_ii = get_prob_matrix(n_i, n_i, theta_i, theta_i, p_ii, kappa)
+    # kappa_e for connections FROM E cells (EE, IE), kappa_i for connections FROM I cells (EI, II)
+    P_ee = get_prob_matrix(n_e, n_e, theta_e, theta_e, p_ee, kappa_e)
+    P_ie = get_prob_matrix(n_e, n_i, theta_e, theta_i, p_ie, kappa_e)  # Input from E (cols), Output to I (rows)
+    P_ei = get_prob_matrix(n_i, n_e, theta_i, theta_e, p_ei, kappa_i)  # Input from I, Output to E
+    P_ii = get_prob_matrix(n_i, n_i, theta_i, theta_i, p_ii, kappa_i)
 
     # 3. Sample actual connections based on P matrices
     ee_cons = np.random.rand(n_e, n_e) < P_ee

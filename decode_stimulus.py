@@ -1,14 +1,16 @@
 """
-Linear decoding of stimulus identity from spiking activity.
+Linear and quadratic decoding of stimulus identity from spiking activity.
 
-Uses a linear SVM with cross-validated regularization to classify stimuli,
-and plots decoding accuracy as a function of number of neurons.
+Uses a linear SVM and QDA (Quadratic Discriminant Analysis) with cross-validated
+regularization to classify stimuli, comparing decoding accuracy as a function
+of number of neurons. QDA accounts for stimulus-specific covariance matrices.
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 from sklearn.svm import LinearSVC
+from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis
 from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
@@ -25,7 +27,8 @@ def load_responses(directory: str, params: dict) -> tuple[np.ndarray, np.ndarray
         y: (n_samples,) array of stimulus labels
     """
     n_neurons = params['n_excite'] + params['n_inhib']
-    n_stimuli = params['n_stimuli']
+    #n_stimuli = params['n_stimuli']
+    n_stimuli = 4
     n_trials = params['n_trials']
 
     # Shape: (n_neurons, n_stimuli, n_trials)
@@ -103,9 +106,77 @@ def decode_with_n_neurons(X_train: np.ndarray, y_train: np.ndarray,
     }
 
 
+def decode_with_n_neurons_qda(X_train: np.ndarray, y_train: np.ndarray,
+                               X_test: np.ndarray, y_test: np.ndarray,
+                               n_neurons: int, neuron_indices: np.ndarray,
+                               shrinkage_values: np.ndarray, cv_folds: int = 5,
+                               random_state: int = 42) -> dict:
+    """
+    Train and evaluate QDA decoder using a subset of neurons.
+
+    QDA uses per-class covariance matrices, capturing stimulus-dependent
+    covariance structure in the neural responses.
+
+    Args:
+        X_train, y_train: Training data
+        X_test, y_test: Test data
+        n_neurons: Number of neurons to use
+        neuron_indices: Which neurons to select (should have length >= n_neurons)
+        shrinkage_values: Shrinkage parameter values to try (0-1)
+        cv_folds: Number of cross-validation folds
+        random_state: Random seed
+
+    Returns:
+        Dict with best_shrinkage, cv_accuracy, test_accuracy
+    """
+    # Select neurons
+    selected = neuron_indices[:n_neurons]
+    X_train_sub = X_train[:, selected]
+    X_test_sub = X_test[:, selected]
+
+    # Scale data (QDA benefits from standardized features)
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train_sub)
+    X_test_scaled = scaler.transform(X_test_sub)
+
+    # Manual cross-validation over shrinkage
+    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+
+    best_shrinkage = None
+    best_cv_accuracy = -1
+
+    for shrinkage in shrinkage_values:
+        fold_accuracies = []
+        for train_idx, val_idx in cv.split(X_train_scaled, y_train):
+            X_tr, X_val = X_train_scaled[train_idx], X_train_scaled[val_idx]
+            y_tr, y_val = y_train[train_idx], y_train[val_idx]
+
+            qda = QuadraticDiscriminantAnalysis(solver='eigen', shrinkage=shrinkage)
+            qda.fit(X_tr, y_tr)
+            fold_accuracies.append(qda.score(X_val, y_val))
+
+        mean_cv_acc = np.mean(fold_accuracies)
+        if mean_cv_acc > best_cv_accuracy:
+            best_cv_accuracy = mean_cv_acc
+            best_shrinkage = shrinkage
+
+    # Train final model with best shrinkage on full training set
+    final_qda = QuadraticDiscriminantAnalysis(solver='eigen', shrinkage=best_shrinkage)
+    final_qda.fit(X_train_scaled, y_train)
+    test_accuracy = final_qda.score(X_test_scaled, y_test)
+
+    return {
+        'best_shrinkage': best_shrinkage,
+        'cv_accuracy': best_cv_accuracy,
+        'test_accuracy': test_accuracy
+    }
+
+
 def main():
     # Configuration
-    data_dir = "outputs/full_sweep/kappa_0/input_time_200"
+    data_dir = "outputs/longrun/input_time_300/"
+    #data_dir = "outputs/input_sweep/input_rate_kappa_0/input_conn_kappa_0.2"
+    #data_dir = "outputs/full_sweep/kappa_0.6/input_time_600"
     fig_dir = Path("figures")
     fig_dir.mkdir(exist_ok=True)
 
@@ -113,21 +184,25 @@ def main():
     np.random.seed(seed)
 
     # Neuron counts to test
-    neuron_counts = [5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
+    neuron_counts = [5, 10, 20, 50, 100, 200, 500, 1000]#, 2000, 5000]
 
-    # Regularization values to try (log-spaced)
+    # Regularization values to try (log-spaced for SVM)
     C_values = np.logspace(-4, 2, 13)
+
+    # Shrinkage values to try for QDA (linear-spaced, 0-1)
+    shrinkage_values = np.linspace(0, 0.6, 11)
 
     # Cross-validation settings
     cv_folds = 5
-    test_size = 0.2
+    test_size = 0.1
 
     print("Loading data...")
     params = load_params(data_dir)
     X, y = load_responses(data_dir, params)
 
     n_samples, n_neurons_total = X.shape
-    n_stimuli = params['n_stimuli']
+    #n_stimuli = params['n_stimuli']
+    n_stimuli = 4
     n_trials = params['n_trials']
 
     print(f"Data shape: {X.shape}")
@@ -149,61 +224,60 @@ def main():
     neuron_counts = [n for n in neuron_counts if n <= n_neurons_total]
 
     print(f"\nTesting {len(neuron_counts)} neuron counts: {neuron_counts}")
-    print(f"C values to search: {C_values}")
+    print(f"SVM C values: {C_values}")
+    print(f"QDA shrinkage values: {shrinkage_values}")
     print()
 
     # Run decoding for each neuron count
-    results = []
+    svm_results = []
+    qda_results = []
     for n_neurons in neuron_counts:
-        print(f"Decoding with {n_neurons} neurons...", end=" ", flush=True)
+        print(f"Decoding with {n_neurons} neurons...")
 
-        result = decode_with_n_neurons(
+        # Linear SVM
+        print(f"  SVM: ", end="", flush=True)
+        svm_result = decode_with_n_neurons(
             X_train, y_train, X_test, y_test,
             n_neurons, neuron_order, C_values,
             cv_folds=cv_folds, random_state=seed
         )
-        result['n_neurons'] = n_neurons
-        results.append(result)
+        svm_result['n_neurons'] = n_neurons
+        svm_results.append(svm_result)
+        print(f"CV acc: {svm_result['cv_accuracy']:.1%}, "
+              f"Test acc: {svm_result['test_accuracy']:.1%}")
 
-        print(f"CV acc: {result['cv_accuracy']:.1%}, "
-              f"Test acc: {result['test_accuracy']:.1%}, "
-              f"best C: {result['best_C']:.2e}")
+        # QDA
+        print(f"  QDA: ", end="", flush=True)
+        qda_result = decode_with_n_neurons_qda(
+            X_train, y_train, X_test, y_test,
+            n_neurons, neuron_order, shrinkage_values,
+            cv_folds=cv_folds, random_state=seed
+        )
+        qda_result['n_neurons'] = n_neurons
+        qda_results.append(qda_result)
+        print(f"CV acc: {qda_result['cv_accuracy']:.1%}, "
+              f"Test acc: {qda_result['test_accuracy']:.1%}")
 
     # Extract arrays for plotting
-    n_neurons_arr = np.array([r['n_neurons'] for r in results])
-    cv_acc = np.array([r['cv_accuracy'] for r in results])
-    test_acc = np.array([r['test_accuracy'] for r in results])
-    best_C = np.array([r['best_C'] for r in results])
+    n_neurons_arr = np.array([r['n_neurons'] for r in svm_results])
+    svm_test_acc = np.array([r['test_accuracy'] for r in svm_results])
+    qda_test_acc = np.array([r['test_accuracy'] for r in qda_results])
 
-    # Plot results
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    # Plot results - single plot comparing both methods
+    fig, ax = plt.subplots(figsize=(8, 6))
 
-    # Accuracy vs number of neurons
-    ax = axes[0]
-    ax.plot(n_neurons_arr, cv_acc * 100, 'o-', label='CV accuracy', markersize=8)
-    ax.plot(n_neurons_arr, test_acc * 100, 's-', label='Test accuracy', markersize=8)
+    ax.plot(n_neurons_arr, svm_test_acc * 100, 'o-', label='Linear SVM', markersize=8)
+    ax.plot(n_neurons_arr, qda_test_acc * 100, 's-', label='QDA', markersize=8)
     ax.axhline(100 / n_stimuli, color='gray', linestyle='--', label='Chance')
     ax.set_xscale('log')
     ax.set_xlabel('Number of neurons')
-    ax.set_ylabel('Accuracy (%)')
-    ax.set_title('Stimulus Decoding Performance')
+    ax.set_ylabel('Test Accuracy (%)')
+    ax.set_title(f'Stimulus Decoding: Linear SVM vs QDA\n'
+                 f'({n_stimuli} stimuli, {n_trials} trials/stimulus)')
     ax.legend()
     ax.grid(True, alpha=0.3)
     ax.set_ylim([0, 105])
 
-    # Best C vs number of neurons
-    ax = axes[1]
-    ax.plot(n_neurons_arr, best_C, 'o-', color='green', markersize=8)
-    ax.set_xscale('log')
-    ax.set_yscale('log')
-    ax.set_xlabel('Number of neurons')
-    ax.set_ylabel('Best C (regularization)')
-    ax.set_title('Optimal Regularization Strength')
-    ax.grid(True, alpha=0.3)
-
-    plt.suptitle(f'Linear SVM Decoding of {n_stimuli} Stimuli\n'
-                 f'(kappa=0, input_time=200, {n_trials} trials/stimulus)',
-                 fontsize=12)
     plt.tight_layout()
 
     fig_path = fig_dir / 'decoding_vs_neurons.png'
@@ -211,19 +285,22 @@ def main():
     print(f"\nFigure saved to: {fig_path}")
 
     # Print summary table
-    print("\n" + "="*70)
+    print("\n" + "="*80)
     print("DECODING RESULTS SUMMARY")
-    print("="*70)
-    print(f"{'N neurons':>10} {'CV Acc':>10} {'Test Acc':>10} {'Best C':>12}")
-    print("-"*70)
-    for r in results:
-        print(f"{r['n_neurons']:>10} {r['cv_accuracy']:>10.1%} "
-              f"{r['test_accuracy']:>10.1%} {r['best_C']:>12.2e}")
-    print("="*70)
+    print("="*80)
+    print(f"{'N neurons':>10} {'SVM Test':>12} {'QDA Test':>12} {'Difference':>12}")
+    print("-"*80)
+    for svm_r, qda_r in zip(svm_results, qda_results):
+        diff = qda_r['test_accuracy'] - svm_r['test_accuracy']
+        print(f"{svm_r['n_neurons']:>10} {svm_r['test_accuracy']:>12.1%} "
+              f"{qda_r['test_accuracy']:>12.1%} {diff:>+12.1%}")
+    print("="*80)
 
-    # Best result
-    best_idx = np.argmax(test_acc)
-    print(f"\nBest test accuracy: {test_acc[best_idx]:.1%} with {n_neurons_arr[best_idx]} neurons")
+    # Best results
+    svm_best_idx = np.argmax(svm_test_acc)
+    qda_best_idx = np.argmax(qda_test_acc)
+    print(f"\nBest SVM: {svm_test_acc[svm_best_idx]:.1%} with {n_neurons_arr[svm_best_idx]} neurons")
+    print(f"Best QDA: {qda_test_acc[qda_best_idx]:.1%} with {n_neurons_arr[qda_best_idx]} neurons")
 
     plt.show()
 
