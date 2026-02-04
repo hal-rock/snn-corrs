@@ -26,7 +26,7 @@ from corr_analyses import (
 
 def load_spikes_vectorized(directory: str, n_trials: int, n_neurons: int,
                            bin_size: float = 1000, total_time: float = 1000,
-                           start_from: float = 50) -> np.ndarray:
+                           start_from: float = 50, end_time: float = None) -> np.ndarray:
     """
     Load spike data from trial directories into a binned matrix.
 
@@ -37,13 +37,23 @@ def load_spikes_vectorized(directory: str, n_trials: int, n_neurons: int,
         n_trials: Number of trials to load
         n_neurons: Total number of neurons
         bin_size: Time bin size in ms
-        total_time: Total simulation time in ms
+        total_time: Total simulation time in ms (used if end_time not specified)
         start_from: Discard spikes before this time (ms)
+        end_time: Discard spikes at or after this time (ms). If None, uses total_time.
 
     Returns:
         Array of shape (n_neurons, n_trials * n_bins) with spike counts
     """
-    n_bins = int(np.ceil((total_time - start_from) / bin_size))
+    # Use end_time if specified, otherwise fall back to total_time
+    effective_end = end_time if end_time is not None else total_time
+    effective_time = effective_end - start_from
+    n_bins = int(np.floor(effective_time / bin_size))
+
+    # Handle edge case: bin_size >= effective_time
+    if n_bins < 1:
+        n_bins = 1
+        bin_size = effective_time
+
     result = np.zeros((n_neurons, n_trials * n_bins), dtype=np.uint8)
 
     for trial in range(n_trials):
@@ -53,8 +63,8 @@ def load_spikes_vectorized(directory: str, n_trials: int, n_neurons: int,
         times = data['times']
         data.close()
 
-        # Filter to times after start_from
-        mask = times > start_from
+        # Filter to times within [start_from, end_time)
+        mask = (times > start_from) & (times < effective_end)
         idxs = idxs[mask]
         times = times[mask] - start_from
 
@@ -385,7 +395,11 @@ def analyze_parameter_point(directory: str,
                            analyze_inputs: bool = True,
                            analyze_recurrent: bool = True,
                            seed: Optional[int] = None,
-                           verbose: bool = True) -> AnalysisResults:
+                           verbose: bool = True,
+                           bin_size: float = 1000,
+                           total_time: float = 1000,
+                           start_from: float = 50,
+                           end_time: float = None) -> AnalysisResults:
     """
     Complete analysis of a single parameter point.
 
@@ -397,6 +411,10 @@ def analyze_parameter_point(directory: str,
         analyze_recurrent: Whether to analyze recurrent input correlations
         seed: Random seed for neuron sampling
         verbose: Print progress
+        bin_size: Time bin size in ms for spike counting (default: 1000, full trial)
+        total_time: Total simulation time in ms (default: 1000)
+        start_from: Discard spikes before this time in ms (default: 50)
+        end_time: Discard spikes at or after this time in ms (default: None, uses total_time)
 
     Returns:
         AnalysisResults dataclass with all computed statistics
@@ -412,9 +430,24 @@ def analyze_parameter_point(directory: str,
     n_trials = params.get('n_trials', 100)
     n_stimuli = params.get('n_stimuli', 3)
 
+    # Calculate number of bins, handling edge cases
+    effective_end = end_time if end_time is not None else total_time
+    effective_time = effective_end - start_from
+    n_bins = int(np.floor(effective_time / bin_size))
+    if n_bins < 1:
+        # bin_size >= effective_time: fall back to single bin covering full time
+        n_bins = 1
+        bin_size = effective_time
+        if verbose:
+            print(f"  Note: bin_size >= effective time, using single {effective_time}ms bin")
+
+    n_samples = n_trials * n_bins  # total samples per stimulus for correlation
+
     if verbose:
         print(f"Analyzing {directory}")
         print(f"  {n_stimuli} stimuli, {n_trials} trials, {n_neurons} neurons")
+        if n_bins > 1:
+            print(f"  Using {n_bins} bins of {bin_size}ms each ({n_samples} samples per stimulus)")
 
     # Sample neurons
     if seed is not None:
@@ -425,19 +458,21 @@ def analyze_parameter_point(directory: str,
     if verbose:
         print("  Loading spike data...")
 
-    # Shape: (n_neurons, n_stimuli, n_trials)
-    all_responses = np.zeros((n_neurons, n_stimuli, n_trials))
+    # Shape: (n_neurons, n_stimuli, n_samples) where n_samples = n_trials * n_bins
+    all_responses = np.zeros((n_neurons, n_stimuli, n_samples))
     all_spikes = []  # Keep full spike data for recurrent analysis
 
     for stim in range(n_stimuli):
         stim_dir = directory / f'stim{stim}'
         spikes = load_spikes_vectorized(
             str(stim_dir), n_trials, n_neurons,
-            bin_size=1000, total_time=1000, start_from=50
+            bin_size=bin_size, total_time=total_time, start_from=start_from,
+            end_time=end_time
         )
         all_spikes.append(spikes)
-        # Sum over bins to get total counts per trial
-        all_responses[:, stim, :] = spikes.reshape(n_neurons, n_trials, -1).sum(axis=2)
+        # spikes shape is (n_neurons, n_trials * n_bins)
+        # Keep flat - each time bin treated as independent sample for correlation
+        all_responses[:, stim, :] = spikes
 
     # Analyze response correlations
     if verbose:

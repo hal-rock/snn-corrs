@@ -5,6 +5,7 @@ Extracts from each run:
 - Mean correlation
 - Noise fraction
 - Explainable ICC
+- Stimulus/noise variance ratio (residual_var / mean_noise_var)
 
 And plots heatmaps showing how each varies across the parameter space.
 """
@@ -96,9 +97,24 @@ def analyze_sweep(sweep_dir: str,
                   n_neurons_sample: int = 250,
                   n_bootstrap: int = 500,
                   seed: int = 42,
-                  verbose: bool = True) -> dict:
+                  verbose: bool = True,
+                  bin_size: float = 1000,
+                  total_time: float = 1000,
+                  start_from: float = 50,
+                  end_time: float = None) -> dict:
     """
     Analyze all parameter points in a sweep.
+
+    Args:
+        sweep_dir: Path to sweep directory
+        n_neurons_sample: Number of neurons to sample for analysis
+        n_bootstrap: Bootstrap samples for noise estimation
+        seed: Random seed for reproducibility
+        verbose: Print progress
+        bin_size: Time bin size in ms for spike counting (default: 1000, full trial)
+        total_time: Total simulation time in ms (default: 1000)
+        start_from: Discard spikes before this time in ms (default: 50)
+        end_time: Discard spikes at or after this time in ms (default: None, uses total_time)
 
     Returns dict with:
         - param1_name, param1_values
@@ -106,6 +122,7 @@ def analyze_sweep(sweep_dir: str,
         - mean_corr: 2D array of mean correlations
         - noise_frac: 2D array of noise fractions
         - explainable_icc: 2D array of explainable ICC values
+        - stim_to_noise_ratio: 2D array of residual_var / mean_noise_var
         - completed: 2D boolean array of which runs completed
     """
     sweep_path = Path(sweep_dir)
@@ -125,6 +142,7 @@ def analyze_sweep(sweep_dir: str,
     mean_corr = np.full((n1, n2), np.nan)
     noise_frac = np.full((n1, n2), np.nan)
     explainable_icc = np.full((n1, n2), np.nan)
+    stim_to_noise_ratio = np.full((n1, n2), np.nan)
     completed = np.zeros((n1, n2), dtype=bool)
 
     # Analyze each point
@@ -169,17 +187,22 @@ def analyze_sweep(sweep_dir: str,
                     analyze_inputs=False,
                     analyze_recurrent=False,
                     seed=seed,
-                    verbose=False
+                    verbose=False,
+                    bin_size=bin_size,
+                    total_time=total_time,
+                    start_from=start_from,
+                    end_time=end_time
                 )
 
                 stats = results.response_stats
                 mean_corr[i, j] = np.mean(stats.correlations)
                 noise_frac[i, j] = stats.mean_noise_var / stats.total_var
                 explainable_icc[i, j] = stats.explainable_icc
+                stim_to_noise_ratio[i, j] = stats.residual_var / stats.mean_noise_var if stats.mean_noise_var > 0 else np.nan
                 completed[i, j] = True
 
                 if verbose:
-                    print(f"    -> mean_corr={mean_corr[i,j]:.4f}, noise_frac={noise_frac[i,j]:.2%}, exp_icc={explainable_icc[i,j]:.4f}")
+                    print(f"    -> mean_corr={mean_corr[i,j]:.4f}, noise_frac={noise_frac[i,j]:.2%}, exp_icc={explainable_icc[i,j]:.4f}, stim/noise={stim_to_noise_ratio[i,j]:.4f}")
 
             except Exception as e:
                 if verbose:
@@ -195,6 +218,7 @@ def analyze_sweep(sweep_dir: str,
         'mean_corr': mean_corr,
         'noise_frac': noise_frac,
         'explainable_icc': explainable_icc,
+        'stim_to_noise_ratio': stim_to_noise_ratio,
         'completed': completed
     }
 
@@ -215,10 +239,12 @@ def plot_heatmaps(results: dict, fig_dir: str = "figures"):
         ('mean_corr', 'Mean Spike Correlation', 'RdBu_r'),
         ('noise_frac', 'Noise Fraction', 'viridis_r'),
         ('explainable_icc', 'Explainable ICC', 'viridis'),
+        ('stim_to_noise_ratio', 'Stimulus/Noise Variance Ratio', 'plasma'),
     ]
 
     # Create combined figure
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    axes = axes.flatten()
 
     for ax, (key, title, cmap) in zip(axes, metrics):
         data = results[key]
@@ -318,11 +344,21 @@ def main():
                         help='Random seed (default: 42)')
     parser.add_argument('--fig_dir', type=str, default='figures',
                         help='Directory to save figures (default: figures)')
+    parser.add_argument('--bin_size', type=float, default=1000,
+                        help='Time bin size in ms for spike counting (default: 1000, full trial)')
+    parser.add_argument('--total_time', type=float, default=1000,
+                        help='Total simulation time in ms (default: 1000)')
+    parser.add_argument('--start_from', type=float, default=50,
+                        help='Discard spikes before this time in ms (default: 50)')
+    parser.add_argument('--end_time', type=float, default=None,
+                        help='Discard spikes at or after this time in ms (default: None, uses total_time)')
 
     args = parser.parse_args()
 
     print(f"Analyzing sweep: {args.sweep_dir}")
-    print(f"Settings: n_neurons={args.n_neurons}, n_bootstrap={args.n_bootstrap}")
+    end_time_str = f"{args.end_time}ms" if args.end_time else "total_time"
+    print(f"Settings: n_neurons={args.n_neurons}, n_bootstrap={args.n_bootstrap}, bin_size={args.bin_size}ms")
+    print(f"Time window: {args.start_from}ms to {end_time_str}")
     print()
 
     results = analyze_sweep(
@@ -330,7 +366,11 @@ def main():
         n_neurons_sample=args.n_neurons,
         n_bootstrap=args.n_bootstrap,
         seed=args.seed,
-        verbose=True
+        verbose=True,
+        bin_size=args.bin_size,
+        total_time=args.total_time,
+        start_from=args.start_from,
+        end_time=args.end_time
     )
 
     n_completed = results['completed'].sum()

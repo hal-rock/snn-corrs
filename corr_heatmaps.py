@@ -132,9 +132,20 @@ def discover_sweep_structure(sweep_dir: str) -> Tuple[str, List[float], str, Lis
 # =============================================================================
 
 def compute_spike_correlations(directory: str, params: dict,
-                                neuron_indices: np.ndarray) -> np.ndarray:
+                                neuron_indices: np.ndarray,
+                                bin_size: float = 1000,
+                                total_time: float = 1000,
+                                start_from: float = 50) -> np.ndarray:
     """
     Compute mean pairwise spike correlations across stimuli for selected neurons.
+
+    Args:
+        directory: Path to parameter point directory
+        params: Simulation parameters dict
+        neuron_indices: Indices of neurons to analyze
+        bin_size: Time bin size in ms for spike counting (default: 1000)
+        total_time: Total simulation time in ms (default: 1000)
+        start_from: Discard spikes before this time in ms (default: 50)
 
     Returns correlations for all pairs of the selected neurons.
     """
@@ -144,15 +155,17 @@ def compute_spike_correlations(directory: str, params: dict,
     n_selected = len(neuron_indices)
 
     # Collect spike counts: (n_selected, n_stimuli, n_trials)
-    all_responses = np.zeros((n_selected, n_stimuli, n_trials))
+    n_bins = int((total_time - start_from) / bin_size)
+    all_responses = np.zeros((n_selected, n_stimuli, n_trials * n_bins))
 
     for stim in range(n_stimuli):
         stim_dir = f"{directory}/stim{stim}"
         spikes = load_spikes_vectorized(
             stim_dir, n_trials, n_neurons_total,
-            bin_size=1000, total_time=1000, start_from=50
+            bin_size=bin_size, total_time=total_time, start_from=start_from
         )
-        # Select our neurons and reshape
+        # spikes shape: (n_neurons, n_trials * n_bins) when bin_size < total_time
+        # Select our neurons
         all_responses[:, stim, :] = spikes[neuron_indices]
 
     # Compute correlations for each stimulus, then average
@@ -226,9 +239,20 @@ def compute_shared_inputs(input_conn: np.ndarray, recurrent_conn: np.ndarray,
 
 def analyze_shared_input_correlations(directory: str,
                                        n_neurons_sample: int = 200,
-                                       seed: int = 42) -> dict:
+                                       seed: int = 42,
+                                       bin_size: float = 1000,
+                                       total_time: float = 1000,
+                                       start_from: float = 50) -> dict:
     """
     Compute correlations between spike correlations and shared input types.
+
+    Args:
+        directory: Path to parameter point directory
+        n_neurons_sample: Number of neurons to sample
+        seed: Random seed for reproducibility
+        bin_size: Time bin size in ms for spike counting (default: 1000)
+        total_time: Total simulation time in ms (default: 1000)
+        start_from: Discard spikes before this time in ms (default: 50)
 
     Returns dict with Pearson r values for each shared input type.
     """
@@ -254,7 +278,10 @@ def analyze_shared_input_correlations(directory: str,
     neuron_indices = np.random.choice(n_neurons, n_neurons_sample, replace=False)
 
     # Compute spike correlations
-    spike_corrs, _ = compute_spike_correlations(directory, params_copy, neuron_indices)
+    spike_corrs, _ = compute_spike_correlations(
+        directory, params_copy, neuron_indices,
+        bin_size=bin_size, total_time=total_time, start_from=start_from
+    )
 
     # Compute shared input magnitudes
     ff_shared, exc_shared, inh_shared, total_rec_shared = compute_shared_inputs(
@@ -290,9 +317,21 @@ def analyze_shared_input_correlations(directory: str,
 def analyze_sweep_shared_input(sweep_dir: str,
                                 n_neurons_sample: int = 200,
                                 seed: int = 42,
-                                verbose: bool = True) -> dict:
+                                verbose: bool = True,
+                                bin_size: float = 1000,
+                                total_time: float = 1000,
+                                start_from: float = 50) -> dict:
     """
     Analyze shared input-noise correlation relationships across all parameter points.
+
+    Args:
+        sweep_dir: Path to sweep directory
+        n_neurons_sample: Number of neurons to sample for analysis
+        seed: Random seed for reproducibility
+        verbose: Print progress
+        bin_size: Time bin size in ms for spike counting (default: 1000, full trial)
+        total_time: Total simulation time in ms (default: 1000)
+        start_from: Discard spikes before this time in ms (default: 50)
 
     Returns dict with:
         - param1_name, param1_values
@@ -364,7 +403,10 @@ def analyze_sweep_shared_input(sweep_dir: str,
                 results = analyze_shared_input_correlations(
                     str(dir_name),
                     n_neurons_sample=n_neurons_sample,
-                    seed=seed
+                    seed=seed,
+                    bin_size=bin_size,
+                    total_time=total_time,
+                    start_from=start_from
                 )
 
                 r_feedforward[i, j] = results['feedforward']['r']
@@ -605,18 +647,27 @@ def main():
                         help='Random seed (default: 42)')
     parser.add_argument('--fig_dir', type=str, default='figures',
                         help='Directory to save figures (default: figures)')
+    parser.add_argument('--bin_size', type=float, default=1000,
+                        help='Time bin size in ms for spike counting (default: 1000, full trial)')
+    parser.add_argument('--total_time', type=float, default=1000,
+                        help='Total simulation time in ms (default: 1000)')
+    parser.add_argument('--start_from', type=float, default=50,
+                        help='Discard spikes before this time in ms (default: 50)')
 
     args = parser.parse_args()
 
     print(f"Analyzing sweep: {args.sweep_dir}")
-    print(f"Settings: n_neurons={args.n_neurons}, seed={args.seed}")
+    print(f"Settings: n_neurons={args.n_neurons}, seed={args.seed}, bin_size={args.bin_size}ms")
     print()
 
     results = analyze_sweep_shared_input(
         args.sweep_dir,
         n_neurons_sample=args.n_neurons,
         seed=args.seed,
-        verbose=True
+        verbose=True,
+        bin_size=args.bin_size,
+        total_time=args.total_time,
+        start_from=args.start_from
     )
 
     n_completed = results['completed'].sum()

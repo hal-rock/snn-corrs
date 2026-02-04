@@ -31,8 +31,28 @@ import numpy as np
 # Local imports
 import ConnMatGenerator as connmat
 from input_generation import generate_input_spikes, generate_rate_vector
+from dimension_mappings import (create_dimension_mappings, save_dimension_mappings,
+                                 load_dimension_mappings)
 # Use fastSNN_fastparallel for runtime mode (faster than standalone with recompilation)
 from fastSNN_fastparallel import run_trials_parallel
+
+
+def generate_stimulus_grid(n_dims, n_stimuli_per_dim):
+    """
+    Generate combinatorial grid of stimulus centers for multi-dimensional tuning.
+
+    For n_dims=2, n_stimuli_per_dim=3:
+    Returns 9 tuples: [(0, 0), (0, pi/3), (0, 2pi/3), (pi/3, 0), ...]
+
+    Parameters:
+        n_dims: Number of tuning dimensions
+        n_stimuli_per_dim: Number of stimuli per dimension
+
+    Returns:
+        List of tuples, each containing bump_center for each dimension
+    """
+    per_dim_centers = np.linspace(0, np.pi, n_stimuli_per_dim, endpoint=False)
+    return list(itertools.product(*[per_dim_centers] * n_dims))
 
 
 # Default configuration - all parameters with their default values
@@ -66,6 +86,13 @@ DEFAULT_CONFIG = {
     "input_rate_kappa": 0.0,   # Von Mises kappa for input rate bump (0 = no structure)
     "input_conn_kappa": 0.0,   # Von Mises kappa for input connectivity structure (0 = random)
 
+    # Multi-dimensional tuning parameters
+    "n_dims": 1,                       # number of tuning dimensions (1 = single dimension)
+    "n_stimuli_per_dim": None,         # stimuli per dimension; if set, total = n_stimuli_per_dim^n_dims
+    "kappa_per_dim": None,             # list of kappas per dim for recurrent connectivity
+    "input_rate_kappa_per_dim": None,  # list of kappas per dim for input rate bump
+    "input_conn_kappa_per_dim": None,  # list of kappas per dim for input connectivity
+
     # Simulation parameters
     "simulation_time": 1.05,  # total simulation time in seconds
     "n_trials": 200,          # number of trials per stimulus
@@ -74,6 +101,11 @@ DEFAULT_CONFIG = {
 
     # Neuron parameters
     "Vsi": -75,  # inhibitory reversal potential (mV)
+    "I_mu": 0.0,   # mean injected current for all neurons (pA)
+    "I_sigma": 0.0,  # std of injected current across trials (pA); 0 = constant
+
+    # Random seed (None = use system entropy)
+    "random_seed": None,
 
     # Parallelization
     "n_workers": None,  # None = use all CPUs
@@ -101,9 +133,13 @@ SWEEPABLE_PARAMS = {
     "input_conn_kappa": float,
     "simulation_time": float,
     "Vsi": float,
+    "I_mu": float,
+    "I_sigma": float,
     "n_excite": int,
     "n_inhib": int,
     "n_input": int,
+    "n_dims": int,
+    "n_stimuli_per_dim": int,
 }
 
 
@@ -209,16 +245,54 @@ def run_single_sweep_point(params, output_dir, run_name):
     n_cells = n_excite + n_inhib
     n_input = params['n_input']
     n_trials = params['n_trials']
-    n_stimuli = params['n_stimuli']
     n_workers = params.get('n_workers') or mp.cpu_count()
+
+    # Multi-dimensional tuning parameters
+    n_dims = params.get('n_dims', 1)
+    n_stimuli_per_dim = params.get('n_stimuli_per_dim')
+    kappa_per_dim = params.get('kappa_per_dim')
+    input_rate_kappa_per_dim = params.get('input_rate_kappa_per_dim')
+    input_conn_kappa_per_dim = params.get('input_conn_kappa_per_dim')
+
+    # Determine stimulus configuration
+    if n_stimuli_per_dim is not None:
+        n_stimuli = n_stimuli_per_dim ** n_dims
+        stimulus_centers = generate_stimulus_grid(n_dims, n_stimuli_per_dim)
+    else:
+        n_stimuli = params['n_stimuli']
+        if n_dims == 1:
+            # Single dimension - wrap bump_centers in tuples for uniform interface
+            stimulus_centers = [(c,) for c in np.linspace(0, np.pi, n_stimuli, endpoint=False)]
+        else:
+            raise ValueError("n_stimuli_per_dim is required when n_dims > 1")
+
+    # Get injected current parameters (I_values generated per-stimulus below)
+    I_mu = params.get('I_mu', 0.0)
+    I_sigma = params.get('I_sigma', 0.0)
+
+    # Create dimension mappings if multi-dimensional
+    dim_mappings = None
+    if n_dims > 1:
+        print(f"  Creating dimension mappings for {n_dims} dimensions...")
+        dim_mappings = create_dimension_mappings(
+            n_dims=n_dims,
+            n_e=n_excite,
+            n_i=n_inhib,
+            n_inputs=n_input,
+            seed=params.get('random_seed')
+        )
 
     # Generate connectivity matrices
     print("  Generating connectivity matrices...")
     input_conn_kappa = params.get('input_conn_kappa', 0.0)
-    if input_conn_kappa > 1e-5:
+
+    if input_conn_kappa > 1e-5 or input_conn_kappa_per_dim is not None:
         input_conn = connmat.gen_ring_input_conn(
             n_input, n_cells, params['pei_p'], params['w_mu'], params['w_sd'],
-            input_conn_kappa
+            input_conn_kappa,
+            n_dims=n_dims,
+            dim_mappings=dim_mappings,
+            kappa_per_dim=input_conn_kappa_per_dim
         )
     else:
         input_conn = connmat.gen_input_conn(
@@ -232,36 +306,70 @@ def run_single_sweep_point(params, output_dir, run_name):
         params['kappa'], None,
         i_multiplier=params['i_multiplier'],
         kappa_e=params.get('kappa_e'),
-        kappa_i=params.get('kappa_i')
+        kappa_i=params.get('kappa_i'),
+        n_dims=n_dims,
+        dim_mappings=dim_mappings,
+        kappa_per_dim=kappa_per_dim
     )
 
-    # Save connectivity
+    # Save connectivity and dimension mappings
     os.makedirs(output_dir, exist_ok=True)
     np.savez(f'{output_dir}/conn_mats.npz', inpt=input_conn, recurrent=recur_conn)
 
-    # Save parameters for this point
-    with open(f'{output_dir}/params.json', 'w') as f:
-        json.dump(params, f, indent=2)
+    if dim_mappings is not None:
+        save_dimension_mappings(dim_mappings, f'{output_dir}/dim_mappings.npz')
 
-    # Compute bump centers evenly distributed across 0 to pi for each stimulus
-    bump_centers = np.linspace(0, np.pi, n_stimuli, endpoint=False)
+    # Save parameters for this point (convert tuples to lists for JSON serialization)
+    params_to_save = params.copy()
+    params_to_save['_n_dims'] = n_dims
+    params_to_save['_n_stimuli'] = n_stimuli
+    params_to_save['_stimulus_centers'] = [list(c) for c in stimulus_centers]
+    with open(f'{output_dir}/params.json', 'w') as f:
+        json.dump(params_to_save, f, indent=2)
+
     input_rate_kappa = params.get('input_rate_kappa', 0.0)
 
     # Run each stimulus
-    for s in range(n_stimuli):
-        print(f"  Stimulus {s+1}/{n_stimuli}")
+    for s, stim_center in enumerate(stimulus_centers):
+        if n_dims == 1:
+            print(f"  Stimulus {s+1}/{n_stimuli} (center={stim_center[0]:.3f})")
+        else:
+            center_str = ', '.join(f'{c:.3f}' for c in stim_center)
+            print(f"  Stimulus {s+1}/{n_stimuli} (centers=[{center_str}])")
 
         stim_dir = f'{output_dir}/stim{s}'
         os.makedirs(stim_dir, exist_ok=True)
 
+        # Save stimulus center for this stimulus
+        np.save(f'{stim_dir}/stimulus_center.npy', np.array(stim_center))
+
+        # Generate per-trial injected currents (independent for each stimulus)
+        if I_sigma > 0:
+            I_values = np.random.normal(I_mu, I_sigma, n_trials)
+        else:
+            I_values = np.full(n_trials, I_mu)
+        np.save(f'{stim_dir}/I_values.npy', I_values)
+
         # Generate input rates with optional bump structure
-        input_rates = generate_rate_vector(
-            n_input,
-            rate_mu=params['rate_mean'],
-            rate_sigma=params['rate_std'],
-            kappa=input_rate_kappa,
-            bump_center=bump_centers[s]
-        )
+        if n_dims == 1:
+            input_rates = generate_rate_vector(
+                n_input,
+                rate_mu=params['rate_mean'],
+                rate_sigma=params['rate_std'],
+                kappa=input_rate_kappa,
+                bump_center=stim_center[0]
+            )
+        else:
+            input_rates = generate_rate_vector(
+                n_input,
+                rate_mu=params['rate_mean'],
+                rate_sigma=params['rate_std'],
+                kappa=input_rate_kappa,
+                n_dims=n_dims,
+                dim_mappings=dim_mappings,
+                bump_centers=stim_center,
+                kappa_per_dim=input_rate_kappa_per_dim
+            )
 
         # Generate input spikes
         inpt_times, inpt_spikes = generate_input_spikes(
@@ -284,7 +392,8 @@ def run_single_sweep_point(params, output_dir, run_name):
             simulation_time=params['simulation_time'],
             output_dir=stim_dir,
             n_workers=n_workers,
-            Vsi=params['Vsi']
+            Vsi=params['Vsi'],
+            I_values=I_values
         )
 
         successful = sum(1 for _, success, _ in results if success)
@@ -334,6 +443,8 @@ Examples:
                         help='Number of parallel workers (default: all CPUs)')
     parser.add_argument('--runs', type=int, default=None,
                         help='Number of independent runs with different network initializations (default: 1)')
+    parser.add_argument('--random_seed', type=int, default=None,
+                        help='Random seed for reproducibility (default: None = system entropy)')
 
     # Add arguments for all sweepable parameters
     for param, ptype in SWEEPABLE_PARAMS.items():
@@ -369,6 +480,14 @@ Examples:
     if args.runs is not None:
         config['runs'] = args.runs
     n_runs = config.get('runs', 1)
+
+    # Handle random seed - set at outermost level for reproducibility
+    if args.random_seed is not None:
+        config['random_seed'] = args.random_seed
+    random_seed = config.get('random_seed')
+    if random_seed is not None:
+        np.random.seed(random_seed)
+        print(f"Random seed set to: {random_seed}")
 
     # Generate sweep combinations
     combinations = generate_sweep_combinations(config)

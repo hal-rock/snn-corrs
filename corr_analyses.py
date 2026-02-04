@@ -4,6 +4,103 @@ import matplotlib.pyplot as plt
 import multiprocessing
 from functools import partial
 
+import numpy as np
+
+# gemini's code for 'quadratic d prime' to quantify
+# how well you should be able to distinguish trials based on covariance alone
+# note this should be used with centered data... per-class centered
+def calculate_quadratic_d_prime(data, shrinkage=0.0):
+    """
+    Calculates the pairwise Quadratic d-prime (d'_Q) between conditions.
+    
+    Parameters:
+    -----------
+    data : np.ndarray
+        Shape (N, S, T).
+        N = Dimension of the data (features/neurons/sensors).
+        S = Number of conditions/classes.
+        T = Number of samples/trials per condition.
+        
+    shrinkage : float, optional (default=0.0)
+        A value between 0 and 1.
+        0.0 = No shrinkage (Empirical Covariance).
+        1.0 = Full shrinkage (Diagonal matrix with mean variance).
+        
+    Returns:
+    --------
+    d_prime_matrix : np.ndarray
+        Shape (S, S). A symmetric matrix where entry [i, j] is the 
+        quadratic d-prime between condition i and condition j.
+    """
+    N, S, T = data.shape
+    
+    # 1. Estimate Covariance Matrices for each condition
+    covs = []
+    for s in range(S):
+        # Extract data for condition s: shape (N, T)
+        # N features (rows), T trials (cols) matches rowvar=True default
+        condition_data = data[:, s, :]
+        
+        sigma = np.cov(condition_data, rowvar=True)
+        
+        # Apply Shrinkage (Ridge-like regularization)
+        if shrinkage > 0:
+            avg_var = np.trace(sigma) / N
+            target = np.eye(N) * avg_var
+            sigma = (1 - shrinkage) * sigma + shrinkage * target
+            
+        covs.append(sigma)
+        
+    covs = np.array(covs)
+    
+    # 2. Pre-compute Precision Matrices (Inverses)
+    precs = []
+    for sigma in covs:
+        if shrinkage > 0:
+            precs.append(np.linalg.inv(sigma))
+        else:
+            precs.append(np.linalg.pinv(sigma))
+            
+    d_prime_matrix = np.zeros((S, S))
+
+    # 3. Compute Pairwise d'_Q
+    for i in range(S):
+        for j in range(i + 1, S):
+            Sigma_i = covs[i]
+            Sigma_j = covs[j]
+            Prec_i = precs[i]
+            Prec_j = precs[j]
+            
+            # The Decision Matrix M (Difference of Precision Matrices)
+            M = Prec_j - Prec_i
+            
+            # Intermediate matrix products
+            Sigma_i_M = Sigma_i @ M
+            Sigma_j_M = Sigma_j @ M
+            
+            # --- Numerator (Signal) ---
+            # Difference in expected "energy"
+            mu_energy_i = np.trace(Sigma_i_M)
+            mu_energy_j = np.trace(Sigma_j_M)
+            signal = np.abs(mu_energy_i - mu_energy_j)
+            
+            # --- Denominator (Noise) ---
+            # Variance of the quadratic form
+            var_energy_i = 2 * np.trace(Sigma_i_M @ Sigma_i_M)
+            var_energy_j = 2 * np.trace(Sigma_j_M @ Sigma_j_M)
+            
+            total_noise = np.sqrt(var_energy_i + var_energy_j)
+            
+            if total_noise < 1e-12:
+                d_val = 0.0
+            else:
+                d_val = signal / total_noise
+            
+            d_prime_matrix[i, j] = d_val
+            d_prime_matrix[j, i] = d_val
+            
+    return d_prime_matrix
+
 # AI slop for quantifying "usefulness" of splitting stimuli by corrs
 def calculate_icc(data):
     """

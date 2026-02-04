@@ -26,10 +26,13 @@ import ConnMatGenerator as connmat
 # Use runtime mode with Cython for good performance
 prefs.codegen.target = 'cython'
 
+# Suppress Brian2 namespace resolution warnings (expected when passing I_inj/Vsi per trial)
+BrianLogger.suppress_hierarchy('brian2.groups.group.Group.resolve')
+
 
 def run_trials_parallel(input_conn, recur_conn, input_times_list, input_spikes_list,
                         n_excite, n_inhib, simulation_time, output_dir,
-                        n_workers=None, Vsi=-75):
+                        n_workers=None, Vsi=-75, I_values=None):
     """
     Run multiple trials in parallel using runtime mode.
 
@@ -47,6 +50,7 @@ def run_trials_parallel(input_conn, recur_conn, input_times_list, input_spikes_l
         output_dir: Base output directory
         n_workers: Number of parallel workers (default: CPU count)
         Vsi: Inhibitory reversal potential
+        I_values: Array of injected currents (pA), one per trial (same for E and I)
 
     Returns:
         List of (trial_id, success, pid) tuples
@@ -57,10 +61,14 @@ def run_trials_parallel(input_conn, recur_conn, input_times_list, input_spikes_l
     n_trials = len(input_times_list)
     print(f"Running {n_trials} trials with {n_workers} workers (runtime mode)...")
 
-    # Package trial arguments
+    # Default to zero current if not provided
+    if I_values is None:
+        I_values = np.zeros(n_trials)
+
+    # Package trial arguments - each trial gets its own I_value
     trial_args = [
         (trial_id, input_times_list[trial_id], input_spikes_list[trial_id],
-         input_conn, recur_conn, n_excite, n_inhib, simulation_time, output_dir, Vsi)
+         input_conn, recur_conn, n_excite, n_inhib, simulation_time, output_dir, Vsi, I_values[trial_id])
         for trial_id in range(n_trials)
     ]
 
@@ -82,7 +90,7 @@ def run_trials_parallel(input_conn, recur_conn, input_times_list, input_spikes_l
 def _run_trial_worker(args):
     """Worker function for run_trials_parallel."""
     (trial_id, inpt_times, inpt_spikes, input_conn, recur_conn,
-     n_excite, n_inhib, simulation_time, output_dir, Vsi) = args
+     n_excite, n_inhib, simulation_time, output_dir, Vsi, I_inj) = args
 
     pid = os.getpid()
     trial_dir = f'{output_dir}/trial{trial_id}'
@@ -96,7 +104,8 @@ def _run_trial_worker(args):
             inputs=(inpt_times, inpt_spikes),
             simulation_time=simulation_time,
             trial_dir=trial_dir,
-            Vsi=Vsi
+            Vsi=Vsi,
+            I_inj=I_inj
         )
         return (trial_id, True, pid)
     except Exception as e:
@@ -105,7 +114,7 @@ def _run_trial_worker(args):
 
 
 def run_single_trial(n_excite, n_inhib, input_conn, recur_conn, inputs,
-                     simulation_time, trial_dir, Vsi=-75):
+                     simulation_time, trial_dir, Vsi=-75, I_inj=0.0):
     """
     Run a single simulation trial in runtime mode.
 
@@ -117,6 +126,7 @@ def run_single_trial(n_excite, n_inhib, input_conn, recur_conn, inputs,
         simulation_time: Total simulation time in seconds
         trial_dir: Output directory for this trial
         Vsi: Inhibitory reversal potential
+        I_inj: Injected current for all neurons (pA), same for E and I
 
     Returns:
         True if successful
@@ -138,12 +148,16 @@ def run_single_trial(n_excite, n_inhib, input_conn, recur_conn, inputs,
     taup = 10 * ms
     tauw, a, b = 144 * ms, 4 * nS, 80.5 * pA
 
+    # Injected current with units (same for E and I)
+    I_inj_val = I_inj * pA
+
     eqs = '''
-        dvm/dt = (gL*(EL - vm) + gse*(Vse-vm) + gsi*(Vsi-vm)+ gP*(Vse-vm) + gL*DeltaT*exp((vm - VT)/DeltaT) - w)/C : volt
+        dvm/dt = (gL*(EL - vm) + gse*(Vse-vm) + gsi*(Vsi-vm)+ gP*(Vse-vm) + gL*DeltaT*exp((vm - VT)/DeltaT) - w + I_inj)/C : volt
         dw/dt = (a*(vm - EL) - w)/tauw : amp
         dgse/dt=-gse/taue : siemens
         dgsi/dt=-gsi/taui : siemens
         dgP/dt=-gP/taup : siemens
+        I_inj : amp
     '''
 
     namespace = {
@@ -160,6 +174,10 @@ def run_single_trial(n_excite, n_inhib, input_conn, recur_conn, inputs,
     i_neurons = NeuronGroup(n_inhib, model=eqs, threshold='vm>Vcut',
                             reset="vm=EL;w+=b", refractory=2*ms, method='euler',
                             namespace=namespace)
+
+    # Set injected current (same for both populations)
+    e_neurons.I_inj = I_inj_val
+    i_neurons.I_inj = I_inj_val
 
     # Initial membrane potentials
     e_neurons.vm = 'rand()*10*mV - 70*mV'
@@ -241,6 +259,8 @@ def run_parameter_point(param_args):
     rate_std = param_args['rate_std']
     save_dir = param_args['save_dir']
     Vsi = param_args.get('Vsi', -75)
+    I_mu = param_args.get('I_mu', 0.0)
+    I_sigma = param_args.get('I_sigma', 0.0)
 
     # Connection params
     ee_p = param_args['ee_p']
@@ -249,6 +269,7 @@ def run_parameter_point(param_args):
     ii_p = param_args['ii_p']
     w_mu = param_args['w_mu']
     w_sd = param_args['w_sd']
+    i_multiplier = param_args.get('i_multiplier', 10)
 
     pid = os.getpid()
 
@@ -270,7 +291,7 @@ def run_parameter_point(param_args):
         print(f"[PID {pid}] Generating connectivity for kappa={kappa:.1f}{kappa_e_str}{kappa_i_str}...")
         recur_conn = connmat.gen_ring_conn(
             n_excite, n_inhib, ii_p, ei_p, ie_p, ee_p,
-            w_mu, w_sd, kappa, None, i_multiplier=10,
+            w_mu, w_sd, kappa, None, i_multiplier=i_multiplier,
             kappa_e=kappa_e, kappa_i=kappa_i
         )
 
@@ -278,11 +299,11 @@ def run_parameter_point(param_args):
         os.makedirs(save_dir, exist_ok=True)
         np.savez(f'{save_dir}/conn_mats.npz', inpt=input_conn, recurrent=recur_conn)
 
-        # Pre-generate all input spikes
+        # Pre-generate all input spikes and per-trial currents
         print(f"[PID {pid}] Generating input spikes for {n_stimuli} stimuli x {n_trials} trials...")
         bump_centers = np.linspace(0, np.pi, n_stimuli, endpoint=False)
 
-        all_inputs = []  # List of (stim_idx, trial_idx, stim_dir, indices, times)
+        all_inputs = []  # List of (stim_idx, trial_idx, stim_dir, indices, times, I_inj)
 
         for s in range(n_stimuli):
             input_rates = generate_rate_vector(
@@ -293,20 +314,27 @@ def run_parameter_point(param_args):
                 input_rates, n_trials, input_time * 1000, output_file=None
             )
 
+            # Generate per-trial injected currents (independent for each stimulus)
+            if I_sigma > 0:
+                I_values = np.random.normal(I_mu, I_sigma, n_trials)
+            else:
+                I_values = np.full(n_trials, I_mu)
+
             stim_dir = f'{save_dir}/stim{s}'
             os.makedirs(stim_dir, exist_ok=True)
             np.savez(f'{stim_dir}/input_times.npz', *inpt_times)
             np.savez(f'{stim_dir}/input_spikes.npz', *inpt_spikes)
+            np.save(f'{stim_dir}/I_values.npy', I_values)
 
             for t in range(n_trials):
-                all_inputs.append((s, t, stim_dir, inpt_times[t], inpt_spikes[t]))
+                all_inputs.append((s, t, stim_dir, inpt_times[t], inpt_spikes[t], I_values[t]))
 
         # Run all trials
         print(f"[PID {pid}] Running {len(all_inputs)} trials for kappa={kappa:.1f}, input_time={input_time:.1f}...")
         run_start = time.time()
         trials_completed = 0
 
-        for s, t, stim_dir, trial_indices, trial_times in all_inputs:
+        for s, t, stim_dir, trial_indices, trial_times, I_inj in all_inputs:
             trial_dir = f'{stim_dir}/trial{t}'
 
             try:
@@ -318,7 +346,8 @@ def run_parameter_point(param_args):
                     inputs=(trial_indices, trial_times),
                     simulation_time=simulation_time,
                     trial_dir=trial_dir,
-                    Vsi=Vsi
+                    Vsi=Vsi,
+                    I_inj=I_inj
                 )
                 trials_completed += 1
 
@@ -404,7 +433,10 @@ def run_sweep_parallel(config, n_workers=None):
                 'ii_p': config.get('ii_p', 0.2),
                 'w_mu': w_mu,
                 'w_sd': w_sd,
+                'i_multiplier': config.get('i_multiplier', 10),
                 'Vsi': config.get('Vsi', -75),
+                'I_mu': config.get('I_mu', 0.0),
+                'I_sigma': config.get('I_sigma', 0.0),
             }
             param_points.append(param_args)
 
@@ -481,7 +513,10 @@ if __name__ == '__main__':
             'ii_p': 0.2,
             'w_mu': -0.64,
             'w_sd': 0.51,
+            'i_multiplier': 10,
             'Vsi': -75,
+            'I_mu': 0.0,   # mean injected current for all neurons (pA)
+            'I_sigma': 0.0,  # std of injected current across trials (pA)
         }
         print("Running TEST configuration (2 kappa x 1 input_time x 2 stim x 5 trials)")
     else:
@@ -507,7 +542,10 @@ if __name__ == '__main__':
             'ii_p': 0.2,
             'w_mu': -0.64,
             'w_sd': 0.51,
+            'i_multiplier': 10,
             'Vsi': -75,
+            'I_mu': 0.0,   # mean injected current for all neurons (pA)
+            'I_sigma': 0.0,  # std of injected current across trials (pA)
         }
 
     n_workers = args.n_workers or min(mp.cpu_count(), 16)
