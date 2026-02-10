@@ -20,10 +20,10 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.pipeline import Pipeline
 
-from analysis import load_spikes_vectorized, load_params
+from analysis import load_spikes_vectorized, load_params, get_n_stimuli
 
 
-def load_responses(directory: str, params: dict, n_stimuli: int = 4,
+def load_responses(directory: str, params: dict, n_stimuli: int = None,
                    duration: float = None, start_from: float = 50) -> tuple[np.ndarray, np.ndarray]:
     """
     Load spike count responses for all neurons across all stimuli/trials.
@@ -31,7 +31,7 @@ def load_responses(directory: str, params: dict, n_stimuli: int = 4,
     Args:
         directory: Path to simulation output directory
         params: Simulation parameters dict
-        n_stimuli: Number of stimuli to load
+        n_stimuli: Number of stimuli to load. If None, auto-detect from params/directory.
         duration: Duration in ms to use for spike counting (after start_from).
                   If None, uses full simulation time.
         start_from: Time in ms to start counting spikes (default: 50ms to skip transient)
@@ -42,6 +42,8 @@ def load_responses(directory: str, params: dict, n_stimuli: int = 4,
     """
     n_neurons = params['n_excite'] + params['n_inhib']
     n_trials = params['n_trials']
+    if n_stimuli is None:
+        n_stimuli = get_n_stimuli(params, directory)
 
     # Determine total_time based on duration argument
     if duration is None:
@@ -213,8 +215,8 @@ def main():
                         help='Directory containing simulation output')
     parser.add_argument('--use_pca', action='store_true',
                         help='Sweep over PCs instead of neurons')
-    parser.add_argument('--n_stimuli', type=int, default=4,
-                        help='Number of stimuli to analyze')
+    parser.add_argument('--n_stimuli', type=int, default=None,
+                        help='Number of stimuli to analyze (auto-detect if not specified)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed')
     parser.add_argument('--save_fig', action='store_true',
@@ -252,7 +254,7 @@ def main():
                           duration=args.duration)
 
     n_samples, n_neurons_total = X.shape
-    n_stimuli = args.n_stimuli
+    n_stimuli = args.n_stimuli if args.n_stimuli is not None else get_n_stimuli(params, args.data_dir)
     n_trials = params['n_trials']
 
     duration_str = f"{args.duration}ms" if args.duration else "full run (~950ms)"

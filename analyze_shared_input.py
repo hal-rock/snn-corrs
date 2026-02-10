@@ -12,7 +12,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 from scipy import stats
-from analysis import load_spikes_vectorized, load_connectivity, load_params
+from analysis import load_spikes_vectorized, load_connectivity, load_params, get_n_stimuli
 
 
 def compute_spike_correlations(directory: str, params: dict, neuron_indices: np.ndarray,
@@ -33,7 +33,7 @@ def compute_spike_correlations(directory: str, params: dict, neuron_indices: np.
     Returns correlations for all pairs of the selected neurons.
     """
     n_neurons_total = params['n_excite'] + params['n_inhib']
-    n_stimuli = params['n_stimuli']
+    n_stimuli = get_n_stimuli(params, directory)
     n_trials = params['n_trials']
     n_selected = len(neuron_indices)
 

@@ -19,7 +19,7 @@ from typing import Tuple, List, Optional
 from scipy import stats
 import re
 
-from analysis import load_spikes_vectorized, load_connectivity, load_params
+from analysis import load_spikes_vectorized, load_connectivity, load_params, get_n_stimuli
 
 
 # =============================================================================
@@ -57,7 +57,7 @@ def compute_network_rates(directory: str, params: dict,
     """
     n_neurons = params['n_excite'] + params['n_inhib']
     n_trials = params['n_trials']
-    n_stimuli = params.get('n_stimuli', 1)
+    n_stimuli = get_n_stimuli(params, directory)
 
     # Get total_time from params if not specified
     if total_time is None:
@@ -354,7 +354,7 @@ def compute_spike_correlations(directory: str, params: dict,
         (mean_corrs, tril_indices): Mean correlations and triangle indices
     """
     n_neurons_total = params['n_excite'] + params['n_inhib']
-    n_stimuli = params.get('n_stimuli', 1)
+    n_stimuli = get_n_stimuli(params, directory)
     n_trials = params['n_trials']
     n_selected = len(neuron_indices)
 
@@ -519,7 +519,7 @@ def analyze_rate_weighted_correlations(directory: str,
     n_excite = params['n_excite']
     n_inhib = params['n_inhib']
     n_neurons = n_excite + n_inhib
-    n_stimuli = params.get('n_stimuli', 1)
+    n_stimuli = get_n_stimuli(params, directory)
 
     # Get total_time from params if not specified
     if total_time is None:

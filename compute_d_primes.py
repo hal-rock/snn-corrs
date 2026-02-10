@@ -15,11 +15,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-from analysis import load_spikes_vectorized, load_params
+from analysis import load_spikes_vectorized, load_params, get_n_stimuli
 from corr_analyses import calculate_quadratic_d_prime
 
 
-def load_responses_3d(directory: str, params: dict, n_stimuli: int = 4,
+def load_responses_3d(directory: str, params: dict, n_stimuli: int = None,
                       duration: float = None, start_from: float = 50) -> np.ndarray:
     """
     Load spike count responses in (N_neurons, S_stimuli, T_trials) format.
@@ -27,7 +27,7 @@ def load_responses_3d(directory: str, params: dict, n_stimuli: int = 4,
     Args:
         directory: Path to simulation output directory
         params: Simulation parameters dict
-        n_stimuli: Number of stimuli to load
+        n_stimuli: Number of stimuli to load. If None, auto-detect from params/directory.
         duration: Duration in ms to use for spike counting (after start_from).
                   If None, uses full simulation time.
         start_from: Time in ms to start counting spikes (default: 50ms to skip transient)
@@ -37,6 +37,8 @@ def load_responses_3d(directory: str, params: dict, n_stimuli: int = 4,
     """
     n_neurons = params['n_excite'] + params['n_inhib']
     n_trials = params['n_trials']
+    if n_stimuli is None:
+        n_stimuli = get_n_stimuli(params, directory)
 
     # Determine total_time based on duration argument
     if duration is None:
@@ -211,8 +213,8 @@ def main():
                         help='Directory containing simulation output')
     parser.add_argument('--shrinkage', type=float, default=0.0,
                         help='Shrinkage parameter for covariance regularization (0-1)')
-    parser.add_argument('--n_stimuli', type=int, default=4,
-                        help='Number of stimuli to analyze')
+    parser.add_argument('--n_stimuli', type=int, default=None,
+                        help='Number of stimuli to analyze (auto-detect if not specified)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed for neuron ordering')
     parser.add_argument('--save_fig', action='store_true',

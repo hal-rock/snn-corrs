@@ -145,6 +145,34 @@ def load_params(directory: str) -> dict:
     raise FileNotFoundError(f"No params.json or config.json found in {directory}")
 
 
+def get_n_stimuli(params: dict, directory: Path = None) -> int:
+    """Get actual stimulus count, handling multi-dimensional sweeps.
+
+    Priority:
+    1. _n_stimuli (computed by run_sweep.py for multi-dim)
+    2. Compute from n_stimuli_per_dim^n_dims
+    3. n_stimuli (legacy single-dim)
+    4. Directory enumeration (fallback)
+
+    Args:
+        params: Parameters dict from load_params()
+        directory: Optional path to check for stim* directories
+
+    Returns:
+        Number of stimuli for this parameter point
+    """
+    if '_n_stimuli' in params:
+        return params['_n_stimuli']
+    if params.get('n_stimuli_per_dim') is not None:
+        n_dims = params.get('n_dims', 1)
+        return params['n_stimuli_per_dim'] ** n_dims
+    if 'n_stimuli' in params:
+        return params['n_stimuli']
+    if directory:
+        return len(list(Path(directory).glob('stim*')))
+    return 1
+
+
 # =============================================================================
 # Correlation Analysis
 # =============================================================================
@@ -428,7 +456,7 @@ def analyze_parameter_point(directory: str,
     n_neurons = n_excite + n_inhib
     n_inputs = params.get('n_input', 3000)
     n_trials = params.get('n_trials', 100)
-    n_stimuli = params.get('n_stimuli', 3)
+    n_stimuli = get_n_stimuli(params, directory)
 
     # Calculate number of bins, handling edge cases
     effective_end = end_time if end_time is not None else total_time

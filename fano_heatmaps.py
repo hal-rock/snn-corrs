@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Tuple, List
 import re
 
-from analysis import load_spikes_vectorized, load_params
+from analysis import load_spikes_vectorized, load_params, get_n_stimuli
 
 
 # =============================================================================
@@ -102,7 +102,7 @@ def compute_firing_rates(directory: str, params: dict) -> Tuple[float, float]:
     n_inhib = params['n_inhib']
     n_neurons = n_excite + n_inhib
     n_trials = params['n_trials']
-    n_stimuli = params.get('n_stimuli', 1)
+    n_stimuli = get_n_stimuli(params, directory)
 
     # Time window for rate calculation (ms)
     start_time = 50  # Skip initial transient

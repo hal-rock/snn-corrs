@@ -15,7 +15,7 @@ from typing import Tuple, List, Optional
 from scipy import stats
 import re
 
-from analysis import load_spikes_vectorized, load_connectivity, load_params
+from analysis import load_spikes_vectorized, load_connectivity, load_params, get_n_stimuli
 
 
 # =============================================================================
@@ -150,7 +150,7 @@ def compute_spike_correlations(directory: str, params: dict,
     Returns correlations for all pairs of the selected neurons.
     """
     n_neurons_total = params['n_excite'] + params['n_inhib']
-    n_stimuli = params.get('n_stimuli', 1)
+    n_stimuli = get_n_stimuli(params, directory)
     n_trials = params['n_trials']
     n_selected = len(neuron_indices)
 
