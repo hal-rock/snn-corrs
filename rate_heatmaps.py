@@ -87,16 +87,22 @@ def discover_sweep_structure(sweep_dir: str) -> Tuple[str, List[float], str, Lis
 # Firing Rate Analysis
 # =============================================================================
 
-def compute_firing_rates(directory: str, params: dict) -> Tuple[float, float]:
+def compute_firing_rates(directory: str, params: dict) -> dict:
     """
     Compute average firing rates for excitatory and inhibitory neurons.
 
-    Args:
-        directory: Path to parameter point directory
-        params: Parameters dict with n_excite, n_inhib, n_trials, n_stimuli
+    If a no_input_mask.npy is present in `directory`, also reports rates
+    split by whether the cell receives any external input. Cells with their
+    input column zeroed (silenced) vs. driven (input-receiving) are reported
+    separately for both E and I populations.
 
     Returns:
-        (mean_exc_rate, mean_inh_rate) in spikes/second
+        Dict with keys:
+          - 'exc_rate', 'inh_rate'  (always present, Hz)
+          - 'exc_driven_rate', 'exc_silenced_rate',
+            'inh_driven_rate', 'inh_silenced_rate'  (NaN if no mask, or if the
+            corresponding subgroup is empty)
+          - 'n_exc_silenced', 'n_inh_silenced'  (0 if no mask)
     """
     n_excite = params['n_excite']
     n_inhib = params['n_inhib']
@@ -109,35 +115,56 @@ def compute_firing_rates(directory: str, params: dict) -> Tuple[float, float]:
     total_time = 1000
     duration_sec = (total_time - start_time) / 1000.0
 
-    # Collect spike counts across all stimuli and trials
-    exc_counts = []
-    inh_counts = []
+    # Optional input-silencing mask (shape: n_neurons, True = silenced)
+    mask_path = Path(directory) / 'no_input_mask.npy'
+    no_input_mask = np.load(mask_path) if mask_path.exists() else None
+
+    # Collect spike counts (neurons x trials) across stimuli
+    exc_chunks = []
+    inh_chunks = []
 
     for stim in range(n_stimuli):
         stim_dir = f"{directory}/stim{stim}"
 
-        # Load spikes with single bin covering the analysis window
         spikes = load_spikes_vectorized(
             stim_dir, n_trials, n_neurons,
             bin_size=total_time - start_time,
             total_time=total_time,
             start_from=start_time
         )
-
         # spikes shape: (n_neurons, n_trials)
-        # Sum across trials for each neuron, then separate E/I
-        exc_counts.append(spikes[:n_excite, :].flatten())
-        inh_counts.append(spikes[n_excite:, :].flatten())
+        exc_chunks.append(spikes[:n_excite, :])
+        inh_chunks.append(spikes[n_excite:, :])
 
-    # Concatenate across stimuli
-    all_exc_counts = np.concatenate(exc_counts)
-    all_inh_counts = np.concatenate(inh_counts)
+    exc_counts = np.concatenate(exc_chunks, axis=1)  # (n_excite, n_trials*n_stimuli)
+    inh_counts = np.concatenate(inh_chunks, axis=1)  # (n_inhib, ...)
 
-    # Convert to rates (spikes/second)
-    mean_exc_rate = np.mean(all_exc_counts) / duration_sec
-    mean_inh_rate = np.mean(all_inh_counts) / duration_sec
+    result = {
+        'exc_rate': float(np.mean(exc_counts) / duration_sec),
+        'inh_rate': float(np.mean(inh_counts) / duration_sec),
+        'exc_driven_rate': np.nan,
+        'exc_silenced_rate': np.nan,
+        'inh_driven_rate': np.nan,
+        'inh_silenced_rate': np.nan,
+        'n_exc_silenced': 0,
+        'n_inh_silenced': 0,
+    }
 
-    return mean_exc_rate, mean_inh_rate
+    if no_input_mask is not None:
+        e_silent = no_input_mask[:n_excite]
+        i_silent = no_input_mask[n_excite:]
+        result['n_exc_silenced'] = int(e_silent.sum())
+        result['n_inh_silenced'] = int(i_silent.sum())
+        if e_silent.any():
+            result['exc_silenced_rate'] = float(np.mean(exc_counts[e_silent]) / duration_sec)
+        if (~e_silent).any():
+            result['exc_driven_rate'] = float(np.mean(exc_counts[~e_silent]) / duration_sec)
+        if i_silent.any():
+            result['inh_silenced_rate'] = float(np.mean(inh_counts[i_silent]) / duration_sec)
+        if (~i_silent).any():
+            result['inh_driven_rate'] = float(np.mean(inh_counts[~i_silent]) / duration_sec)
+
+    return result
 
 
 def analyze_sweep_firing_rates(sweep_dir: str, verbose: bool = True) -> dict:
@@ -167,6 +194,12 @@ def analyze_sweep_firing_rates(sweep_dir: str, verbose: bool = True) -> dict:
     # Initialize result arrays
     exc_rate = np.full((n1, n2), np.nan)
     inh_rate = np.full((n1, n2), np.nan)
+    exc_driven_rate = np.full((n1, n2), np.nan)
+    exc_silenced_rate = np.full((n1, n2), np.nan)
+    inh_driven_rate = np.full((n1, n2), np.nan)
+    inh_silenced_rate = np.full((n1, n2), np.nan)
+    n_exc_silenced = np.zeros((n1, n2), dtype=int)
+    n_inh_silenced = np.zeros((n1, n2), dtype=int)
     completed = np.zeros((n1, n2), dtype=bool)
 
     total_points = n1 * n2
@@ -201,14 +234,26 @@ def analyze_sweep_firing_rates(sweep_dir: str, verbose: bool = True) -> dict:
                     print(f"  [{analyzed+1}/{total_points}] Analyzing {param1_name}={v1}, {param2_name}={v2}...")
 
                 params = load_params(str(dir_name))
-                mean_exc, mean_inh = compute_firing_rates(str(dir_name), params)
+                rates = compute_firing_rates(str(dir_name), params)
 
-                exc_rate[i, j] = mean_exc
-                inh_rate[i, j] = mean_inh
+                exc_rate[i, j] = rates['exc_rate']
+                inh_rate[i, j] = rates['inh_rate']
+                exc_driven_rate[i, j] = rates['exc_driven_rate']
+                exc_silenced_rate[i, j] = rates['exc_silenced_rate']
+                inh_driven_rate[i, j] = rates['inh_driven_rate']
+                inh_silenced_rate[i, j] = rates['inh_silenced_rate']
+                n_exc_silenced[i, j] = rates['n_exc_silenced']
+                n_inh_silenced[i, j] = rates['n_inh_silenced']
                 completed[i, j] = True
 
                 if verbose:
-                    print(f"    -> E: {mean_exc:.1f} Hz, I: {mean_inh:.1f} Hz")
+                    msg = f"    -> E: {rates['exc_rate']:.1f} Hz, I: {rates['inh_rate']:.1f} Hz"
+                    if rates['n_exc_silenced'] > 0 or rates['n_inh_silenced'] > 0:
+                        msg += (f"  [E driven={rates['exc_driven_rate']:.1f} "
+                                f"silenced={rates['exc_silenced_rate']:.1f}; "
+                                f"I driven={rates['inh_driven_rate']:.1f} "
+                                f"silenced={rates['inh_silenced_rate']:.1f}]")
+                    print(msg)
 
             except Exception as e:
                 if verbose:
@@ -223,6 +268,12 @@ def analyze_sweep_firing_rates(sweep_dir: str, verbose: bool = True) -> dict:
         'param2_values': param2_values,
         'exc_rate': exc_rate,
         'inh_rate': inh_rate,
+        'exc_driven_rate': exc_driven_rate,
+        'exc_silenced_rate': exc_silenced_rate,
+        'inh_driven_rate': inh_driven_rate,
+        'inh_silenced_rate': inh_silenced_rate,
+        'n_exc_silenced': n_exc_silenced,
+        'n_inh_silenced': n_inh_silenced,
         'completed': completed
     }
 
@@ -367,8 +418,37 @@ def main():
             data = results[key]
             valid = data[~np.isnan(data)]
             if len(valid) > 0:
-                print(f"  {label:12s}: mean={np.mean(valid):.1f} Hz, "
+                print(f"  {label:24s}: mean={np.mean(valid):.1f} Hz, "
                       f"range=[{np.min(valid):.1f}, {np.max(valid):.1f}] Hz")
+
+        # Driven vs. silenced breakdown (only for points that had a no_input_mask)
+        any_silencing = (results['n_exc_silenced'].sum() + results['n_inh_silenced'].sum()) > 0
+        if any_silencing:
+            print("-" * 60)
+            print("  Driven vs. silenced (only points with input silencing):")
+            split_metrics = [
+                ('exc_driven_rate',   'Excitatory (driven)'),
+                ('exc_silenced_rate', 'Excitatory (silenced)'),
+                ('inh_driven_rate',   'Inhibitory (driven)'),
+                ('inh_silenced_rate', 'Inhibitory (silenced)'),
+            ]
+            for key, label in split_metrics:
+                data = results[key]
+                valid = data[~np.isnan(data)]
+                if len(valid) > 0:
+                    print(f"  {label:24s}: mean={np.mean(valid):.1f} Hz, "
+                          f"range=[{np.min(valid):.1f}, {np.max(valid):.1f}] Hz")
+            # Driven - silenced gap, per point, then aggregated
+            e_gap = results['exc_driven_rate'] - results['exc_silenced_rate']
+            i_gap = results['inh_driven_rate'] - results['inh_silenced_rate']
+            e_gap_valid = e_gap[~np.isnan(e_gap)]
+            i_gap_valid = i_gap[~np.isnan(i_gap)]
+            if len(e_gap_valid) > 0:
+                print(f"  {'E driven - silenced':24s}: mean={np.mean(e_gap_valid):+.2f} Hz, "
+                      f"range=[{np.min(e_gap_valid):+.2f}, {np.max(e_gap_valid):+.2f}] Hz")
+            if len(i_gap_valid) > 0:
+                print(f"  {'I driven - silenced':24s}: mean={np.mean(i_gap_valid):+.2f} Hz, "
+                      f"range=[{np.min(i_gap_valid):+.2f}, {np.max(i_gap_valid):+.2f}] Hz")
         print("="*60)
         print("\nDone!")
     else:

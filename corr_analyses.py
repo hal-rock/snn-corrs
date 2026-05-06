@@ -282,13 +282,14 @@ def bootstrap_correlation_variance_grouped(
 
     return all_variances, all_corrs #np.mean(all_variances)
 
-def bootstrap_worker(boot_idx, group_data, var_idx1, var_idx2, K):
+def bootstrap_worker(boot_idx, group_data, var_idx1, var_idx2, K, seed):
     """
     (Internal subfunction) Performs one bootstrap resample and correlation calculation.
     This function is called in parallel by the main function.
     """
+    rng = np.random.default_rng(seed)
     # 1. Create one bootstrap resample of the data
-    resample_indices = np.random.randint(0, K, size=K)
+    resample_indices = rng.integers(0, K, size=K)
     resampled_data = group_data[:, resample_indices]
 
     # 2. Select the data for every pair
@@ -336,39 +337,151 @@ def bootstrap_all_pairs_variance(original_data, num_bootstrap_samples=1000):
     
     all_group_variances = []
 
+    # Generate independent seeds for each worker call across all groups
+    ss = np.random.SeedSequence()
+    all_seeds = ss.spawn(C * num_bootstrap_samples)
+
     # Outer loop over groups (serial, as requested due to memory constraints)
     for group_idx in range(C):
         print(f"Processing group {group_idx + 1}/{C}...")
         group_data = original_data[:, group_idx, :]
-        
-        # Use partial to "freeze" arguments for the worker function
-        worker_func = partial(
-            bootstrap_worker, 
-            group_data=group_data, 
-            var_idx1=var_idx1, 
-            var_idx2=var_idx2, 
-            K=K
-        )
-        
+        group_seeds = all_seeds[group_idx * num_bootstrap_samples:(group_idx + 1) * num_bootstrap_samples]
+
+        # Build argument tuples with unique seeds for each call
+        args = [(i, group_data, var_idx1, var_idx2, K, seed)
+                for i, seed in enumerate(group_seeds)]
+
         # Create a pool and map the work across cores
-        with multiprocessing.Pool(processes=4) as pool:
-            # map distributes the B bootstrap samples to the worker function
-            # results is a list of B arrays, each of shape (P,)
-            results = pool.map(worker_func, range(num_bootstrap_samples))
-        
+        with multiprocessing.Pool() as pool:
+            results = pool.starmap(bootstrap_worker, args)
+
         # 4. Consolidate results and find variance
         # Shape: (B, P)
         correlations_matrix = np.array(results)
-        
+
         correlations_matrix = np.clip(correlations_matrix, -1 + 1e-9, 1 - 1e-9)
         z_transformed_corrs = np.arctanh(correlations_matrix)
-        
+
         # Calculate variance along axis 0 (the bootstrap sample axis)
         # Shape: (P,)
         variances = np.var(z_transformed_corrs, axis=0, ddof=1)
         all_group_variances.append(variances)
 
     return np.array(all_group_variances)
+
+
+def splithalf_worker(split_idx, group_data, var_idx1, var_idx2, K, seed):
+    """
+    (Internal subfunction) Performs one random split-half and returns the difference
+    in Fisher-z correlations between halves, for all pairs. Shape: (P,).
+    """
+    rng = np.random.default_rng(seed)
+    # Random permutation, split into two non-overlapping halves
+    perm = rng.permutation(K)
+    half = K // 2
+    idx_a, idx_b = perm[:half], perm[half:2*half]
+
+    data_a = group_data[:, idx_a]
+    data_b = group_data[:, idx_b]
+
+    def _vectorized_corr(data, i1, i2):
+        x = data[i1, :]
+        y = data[i2, :]
+        x_c = x - x.mean(axis=1, keepdims=True)
+        y_c = y - y.mean(axis=1, keepdims=True)
+        num = np.sum(x_c * y_c, axis=1)
+        den = np.sqrt(np.sum(x_c**2, axis=1) * np.sum(y_c**2, axis=1))
+        return np.divide(num, den, out=np.zeros_like(num), where=(den != 0))
+
+    r_a = _vectorized_corr(data_a, var_idx1, var_idx2)
+    r_b = _vectorized_corr(data_b, var_idx1, var_idx2)
+
+    r_a = np.clip(r_a, -1 + 1e-9, 1 - 1e-9)
+    r_b = np.clip(r_b, -1 + 1e-9, 1 - 1e-9)
+
+    return np.arctanh(r_a) - np.arctanh(r_b)
+
+
+def splithalf_all_pairs_variance(original_data, num_splits=1000):
+    """
+    Estimates correlation measurement noise variance via split-half trial splitting.
+
+    For each random split, trials are partitioned into two independent halves, correlations
+    are computed from each half, and the squared Fisher-z difference is used to estimate
+    variance. Since the halves are independent, Var(z_A - z_B) = Var(z_A) + Var(z_B),
+    and under ~1/n scaling of Fisher-z variance, Var(z_full) ≈ mean(d²) / 4.
+
+    Args:
+        original_data (np.ndarray): 3D array of shape (N, C, K).
+                                    N: number of variables (cells)
+                                    C: number of groups (stimuli)
+                                    K: number of observations (trials)
+        num_splits (int): Number of random split-halves to average over.
+
+    Returns:
+        np.ndarray: 2D array of shape (C, P) with the estimated variance of the
+                    Fisher-z correlation for each pair using the full K trials,
+                    where P = N*(N-1)/2.
+    """
+    if original_data.ndim != 3:
+        raise ValueError("original_data must be a 3D array of shape (N, C, K).")
+
+    N, C, K = original_data.shape
+
+    if N < 2:
+        raise ValueError("original_data must have at least 2 variables (dim 0).")
+    if K < 4:
+        raise ValueError("Need at least 4 trials to split into halves of size >= 2.")
+
+    var_idx1, var_idx2 = np.tril_indices(N, k=-1)
+
+    all_group_variances = []
+
+    # Generate independent seeds for each worker call across all groups
+    ss = np.random.SeedSequence()
+    all_seeds = ss.spawn(C * num_splits)
+
+    for group_idx in range(C):
+        print(f"Processing group {group_idx + 1}/{C}...")
+        group_data = original_data[:, group_idx, :]
+        group_seeds = all_seeds[group_idx * num_splits:(group_idx + 1) * num_splits]
+
+        args = [(i, group_data, var_idx1, var_idx2, K, seed)
+                for i, seed in enumerate(group_seeds)]
+
+        with multiprocessing.Pool() as pool:
+            results = pool.starmap(splithalf_worker, args)
+
+        # Shape: (num_splits, P)
+        diffs = np.array(results)
+        # Var(z_full) ≈ mean(d²) / 4, using mean(d²) since E[d]=0 by construction
+        variances = np.mean(diffs**2, axis=0) / 4.0
+        all_group_variances.append(variances)
+
+    return np.array(all_group_variances)
+
+
+def analytical_correlation_variance(original_data):
+    """
+    Returns the Gaussian-theory analytical variance of Fisher-z transformed correlations.
+
+    Under bivariate Gaussian assumptions, Var(arctanh(r)) ≈ 1/(K-3).
+    This is expected to be an underestimate for non-Gaussian neural data.
+
+    Args:
+        original_data (np.ndarray): 3D array of shape (N, C, K).
+
+    Returns:
+        np.ndarray: 2D array of shape (C, P) filled with 1/(K-3),
+                    where P = N*(N-1)/2.
+    """
+    if original_data.ndim != 3:
+        raise ValueError("original_data must be a 3D array of shape (N, C, K).")
+
+    N, C, K = original_data.shape
+    num_pairs = N * (N - 1) // 2
+    return np.full((C, num_pairs), 1.0 / (K - 3))
+
 
 # make paired bar plot things for off and on diagonals
 # AI slop for that
@@ -451,15 +564,16 @@ import numpy as np
 import multiprocessing
 from functools import partial
 
-def bootstrap_partial_worker(boot_idx, group_data, var_idx1, var_idx2, K):
+def bootstrap_partial_worker(boot_idx, group_data, var_idx1, var_idx2, K, seed):
     """
     (Internal subfunction) Performs one bootstrap resample and partial correlation calculation.
-    
+
     For each pair of variables (x, y), it partials out the mean of all other variables (z).
     This function is called in parallel by the main function.
     """
+    rng = np.random.default_rng(seed)
     # 1. Create one bootstrap resample of the data
-    resample_indices = np.random.randint(0, K, size=K)
+    resample_indices = rng.integers(0, K, size=K)
     resampled_data = group_data[:, resample_indices]
 
     N = group_data.shape[0]
@@ -539,26 +653,23 @@ def bootstrap_all_pairs_partial_variance(original_data, num_bootstrap_samples=10
     
     all_group_variances = []
 
+    # Generate independent seeds for each worker call across all groups
+    ss = np.random.SeedSequence()
+    all_seeds = ss.spawn(C * num_bootstrap_samples)
+
     # Outer loop over groups (conditions) is serial to manage memory
     for group_idx in range(C):
         print(f"Processing group {group_idx + 1}/{C}...")
         group_data = original_data[:, group_idx, :]
-        
-        # Use partial to "freeze" arguments for the worker function
-        worker_func = partial(
-            bootstrap_partial_worker, 
-            group_data=group_data, 
-            var_idx1=var_idx1, 
-            var_idx2=var_idx2, 
-            K=K
-        )
-        
+        group_seeds = all_seeds[group_idx * num_bootstrap_samples:(group_idx + 1) * num_bootstrap_samples]
+
+        args = [(i, group_data, var_idx1, var_idx2, K, seed)
+                for i, seed in enumerate(group_seeds)]
+
         # Create a pool of workers and map the task across available cores
         with multiprocessing.Pool() as pool:
-            # map distributes the B bootstrap samples to the worker function
-            # results is a list of B arrays, each of shape (P,)
-            results = pool.map(worker_func, range(num_bootstrap_samples))
-        
+            results = pool.starmap(bootstrap_partial_worker, args)
+
         # 4. Consolidate results and find variance
         # Shape: (B, P) -> (num_bootstrap_samples, num_pairs)
         correlations_matrix = np.array(results)
@@ -574,3 +685,46 @@ def bootstrap_all_pairs_partial_variance(original_data, num_bootstrap_samples=10
         all_group_variances.append(variances)
 
     return np.array(all_group_variances)
+
+
+# AI slop function for pairwise geometric means
+def compute_pairwise_gmean(arr):
+    """
+    Computes the pairwise geometric mean for an M x N array.
+
+    The geometric mean of two numbers (a, b) is sqrt(a * b).
+
+    This function computes this for every pair of rows (i, j) in the
+    input array, for each column k.
+
+    The result G[i, j, k] = sqrt(arr[i, k] * arr[j, k]).
+
+    Args:
+        arr (np.ndarray): The input array of shape (M, N).
+                          Assumes all elements are non-negative.
+
+    Returns:
+        np.ndarray: The output array of shape (M, M, N).
+    """
+    # 1. Reshape the array into two broadcastable forms.
+
+    # Shape becomes (M, 1, N).
+    # This treats each M-row as a separate entity to be broadcast.
+    a1 = arr[:, np.newaxis, :]
+
+    # Shape becomes (1, M, N).
+    # This treats each M-row (now as columns) as a separate entity.
+    a2 = arr[np.newaxis, :, :]
+
+    # 2. Multiply them.
+    # Due to broadcasting, NumPy multiplies (M, 1, N) * (1, M, N)
+    # The result is an (M, M, N) array.
+    # The element at [i, j, k] is a1[i, 0, k] * a2[0, j, k]
+    # which is exactly arr[i, k] * arr[j, k].
+    products = a1 * a2
+
+    # 3. Compute the square root to get the geometric mean.
+    # This is an element-wise operation.
+    geometric_means = np.sqrt(products)
+
+    return geometric_means

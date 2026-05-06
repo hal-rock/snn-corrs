@@ -3,7 +3,7 @@ import numpy
 import numpy as np
 from os import path, makedirs
 
-from scipy.stats import vonmises
+from scipy.stats import vonmises, rankdata, norm
 
 from dimension_mappings import get_theta_for_dim, get_theta_arrays_for_population
 
@@ -52,10 +52,101 @@ def get_prob_matrix_multidim(n_src, n_dest, theta_src_list, theta_dest_list, tar
     return np.clip(combined_probs, 0, 1)
 
 
+def compute_input_prob_matrix(n_inputs, n_targets, prob_conn, kappa,
+                               n_dims=1, n_e=None, n_i=None,
+                               dim_mappings=None, kappa_per_dim=None):
+    """
+    Compute the feedforward input connection probability matrix P_ff.
+
+    This is the expected connection probability between each input neuron and
+    each target neuron, given the tuning structure. Used to compute "excess"
+    shared FF input (actual - expected) for ff_alignment.
+
+    Returns:
+        P_ff: ndarray of shape (n_inputs, n_targets)
+    """
+    if n_dims == 1:
+        if kappa < 1e-5:
+            return np.full((n_inputs, n_targets), prob_conn)
+
+        theta_input = np.linspace(0, np.pi, n_inputs, endpoint=False)
+        theta_target = np.linspace(0, np.pi, n_targets, endpoint=False)
+        T_target, T_input = np.meshgrid(theta_target, theta_input)
+        diff_scaled = 2 * (T_target - T_input)
+        P = vonmises.pdf(diff_scaled, kappa)
+        P = P * (prob_conn / np.mean(P))
+        return np.clip(P, 0, 1)
+    else:
+        assert dim_mappings is not None, "dim_mappings required when n_dims > 1"
+        assert n_e is not None and n_i is not None, "n_e and n_i required when n_dims > 1"
+
+        if kappa_per_dim is not None:
+            assert len(kappa_per_dim) == n_dims
+            kappa_list = kappa_per_dim
+        else:
+            kappa_list = [kappa] * n_dims
+
+        theta_input_list = get_theta_arrays_for_population(n_inputs, n_dims, dim_mappings.input_shuffles)
+
+        theta_target_list = []
+        for d in range(n_dims):
+            theta_e = get_theta_for_dim(n_e, d, dim_mappings.e_shuffles)
+            theta_i = get_theta_for_dim(n_i, d, dim_mappings.i_shuffles)
+            theta_target_list.append(np.concatenate([theta_e, theta_i]))
+
+        # get_prob_matrix_multidim(n_src, n_dest, ...) returns shape (n_dest, n_src)
+        # We want (n_inputs, n_targets), so n_src=n_targets, n_dest=n_inputs
+        return get_prob_matrix_multidim(n_targets, n_inputs, theta_target_list, theta_input_list,
+                                         prob_conn, kappa_list)
+
+
+def _assign_weights_with_ff_alignment(n_weights, w_mu, w_sd, excess_vals, rho):
+    """
+    Generate lognormal weights with Gaussian copula alignment to excess shared FF input.
+
+    When rho=0, returns standard iid lognormal weights (current behavior).
+    When rho>0, the same set of lognormal draws is assigned so that larger weights
+    go preferentially to edges with higher excess shared FF input. The marginal
+    distribution of weights is exactly preserved (same set of values, just reordered).
+
+    Parameters:
+        n_weights: number of weights to generate
+        w_mu, w_sd: lognormal parameters
+        excess_vals: array of length n_weights with excess shared FF for each edge
+        rho: rank correlation parameter in [0, 1]
+
+    Returns:
+        weights: array of length n_weights
+    """
+    weights = np.random.lognormal(w_mu, w_sd, n_weights)
+
+    if rho < 1e-10:
+        return weights
+
+    sorted_weights = np.sort(weights)
+
+    # Convert excess values to Gaussian quantiles via rank transformation
+    ranks = rankdata(excess_vals)
+    u = ranks / (n_weights + 1)  # uniform quantiles in (0, 1)
+    z_ff = norm.ppf(u)
+
+    # Generate correlated Gaussian
+    noise = np.random.standard_normal(n_weights)
+    z_mix = rho * z_ff + np.sqrt(1 - rho**2) * noise
+
+    # Assign sorted weights so higher z_mix -> higher weight
+    assignment_order = np.argsort(z_mix)
+    result = np.empty(n_weights)
+    result[assignment_order] = sorted_weights
+
+    return result
+
+
 # AI slop for recurrent connectivity w/ structure
 def gen_ring_conn(n_e, n_i, p_ii, p_ei, p_ie, p_ee, w_mu, w_sd, kappa, output_dir,
                   i_multiplier=10, kappa_e=None, kappa_i=None,
-                  n_dims=1, dim_mappings=None, kappa_per_dim=None):
+                  n_dims=1, dim_mappings=None, kappa_per_dim=None,
+                  ff_alignment=0.0, input_conn=None, input_prob=None):
     '''
     Generates a connectivity matrix with ring-like tuning structure.
 
@@ -78,6 +169,16 @@ def gen_ring_conn(n_e, n_i, p_ii, p_ei, p_ie, p_ee, w_mu, w_sd, kappa, output_di
     kappa_per_dim : list of float, optional
         Kappa value for each dimension. If None, uses kappa (or kappa_e/kappa_i) for all dimensions.
         Length must equal n_dims if provided.
+    ff_alignment : float, optional
+        Rank correlation (rho) between excess shared feedforward input and recurrent
+        weight magnitude, implemented via Gaussian copula. 0 = no alignment (current
+        behavior), 1 = perfect rank correlation. Default 0.0.
+    input_conn : ndarray, optional
+        Feedforward input weight matrix of shape (n_inputs, n_e + n_i). Required when
+        ff_alignment > 0.
+    input_prob : ndarray, optional
+        Feedforward input probability matrix of shape (n_inputs, n_e + n_i). Required
+        when ff_alignment > 0. Used to compute expected shared input from tuning.
     '''
     # Handle backward compatibility: if kappa_e/kappa_i not specified, use kappa
     if kappa_e is None:
@@ -171,18 +272,41 @@ def gen_ring_conn(n_e, n_i, p_ii, p_ei, p_ie, p_ee, w_mu, w_sd, kappa, output_di
     np.fill_diagonal(ee_cons, False)
     np.fill_diagonal(ii_cons, False)
 
-    # 4. Generate lognormal weights (independent of tuning)
-    ee_vals = np.random.lognormal(w_mu, w_sd, np.sum(ee_cons))
-    ie_vals = np.random.lognormal(w_mu, w_sd, np.sum(ie_cons))
-    ei_vals = np.random.lognormal(w_mu, w_sd, np.sum(ei_cons)) * i_multiplier
-    ii_vals = np.random.lognormal(w_mu, w_sd, np.sum(ii_cons)) * i_multiplier
+    # 4. Generate lognormal weights
+    use_ff = ff_alignment > 1e-10 and input_conn is not None and input_prob is not None
+
+    if use_ff:
+        # Compute excess shared feedforward input (weighted by actual FF weights)
+        # actual_shared[i,j] = sum_k w_ki * w_kj (dot product of FF weight columns)
+        # expected_shared[i,j] = E[w]^2 * sum_k P_ff[k,i] * P_ff[k,j]
+        #   (since E[w_ki * w_kj] = P[k,i]*E[w] * P[k,j]*E[w] for independent i,j)
+        ff_weights = input_conn.astype(np.float32)
+        actual_shared = ff_weights.T @ ff_weights     # (n_t, n_t)
+        mean_w = input_conn[input_conn > 0].mean()
+        expected_shared = (mean_w ** 2) * (input_prob.T @ input_prob)  # (n_t, n_t)
+        excess = actual_shared - expected_shared
+
+        # Extract excess for each quadrant's existing connections and assign via copula
+        ee_vals = _assign_weights_with_ff_alignment(
+            np.sum(ee_cons), w_mu, w_sd, excess[:n_e, :n_e][ee_cons], ff_alignment)
+        ie_vals = _assign_weights_with_ff_alignment(
+            np.sum(ie_cons), w_mu, w_sd, excess[n_e:, :n_e][ie_cons], ff_alignment)
+        ei_vals = _assign_weights_with_ff_alignment(
+            np.sum(ei_cons), w_mu, w_sd, excess[:n_e, n_e:][ei_cons], ff_alignment) * i_multiplier
+        ii_vals = _assign_weights_with_ff_alignment(
+            np.sum(ii_cons), w_mu, w_sd, excess[n_e:, n_e:][ii_cons], ff_alignment) * i_multiplier
+    else:
+        ee_vals = np.random.lognormal(w_mu, w_sd, np.sum(ee_cons))
+        ie_vals = np.random.lognormal(w_mu, w_sd, np.sum(ie_cons))
+        ei_vals = np.random.lognormal(w_mu, w_sd, np.sum(ei_cons)) * i_multiplier
+        ii_vals = np.random.lognormal(w_mu, w_sd, np.sum(ii_cons)) * i_multiplier
 
     # 5. Fill the matrix
     total_weights[:n_e, :n_e][ee_cons] = ee_vals
     total_weights[n_e:, :n_e][ie_cons] = ie_vals
     total_weights[:n_e, n_e:][ei_cons] = ei_vals
     total_weights[n_e:, n_e:][ii_cons] = ii_vals
-    
+
     return total_weights
 
 def gen_recurrent_conn(n_e, n_i, p_ii, p_ei, p_ie, p_ee, w_mu, w_sd, output_dir,

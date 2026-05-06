@@ -95,7 +95,7 @@ def discover_sweep_structure(sweep_dir: str) -> Tuple[str, List[float], str, Lis
 
 def analyze_sweep(sweep_dir: str,
                   n_neurons_sample: int = 250,
-                  n_bootstrap: int = 500,
+                  n_splits: int = 500,
                   seed: int = 42,
                   verbose: bool = True,
                   bin_size: float = 1000,
@@ -108,7 +108,7 @@ def analyze_sweep(sweep_dir: str,
     Args:
         sweep_dir: Path to sweep directory
         n_neurons_sample: Number of neurons to sample for analysis
-        n_bootstrap: Bootstrap samples for noise estimation
+        n_splits: Split-half splits for noise estimation
         seed: Random seed for reproducibility
         verbose: Print progress
         bin_size: Time bin size in ms for spike counting (default: 1000, full trial)
@@ -183,7 +183,7 @@ def analyze_sweep(sweep_dir: str,
                 results = analyze_parameter_point(
                     str(dir_name),
                     n_neurons_sample=n_neurons_sample,
-                    n_bootstrap=n_bootstrap,
+                    n_splits=n_splits,
                     analyze_inputs=False,
                     analyze_recurrent=False,
                     seed=seed,
@@ -338,8 +338,8 @@ def main():
                         help='Path to sweep directory (default: outputs/full_sweep)')
     parser.add_argument('--n_neurons', type=int, default=250,
                         help='Number of neurons to sample (default: 250)')
-    parser.add_argument('--n_bootstrap', type=int, default=500,
-                        help='Bootstrap samples (default: 500)')
+    parser.add_argument('--n_splits', type=int, default=500,
+                        help='Split-half splits for noise estimation (default: 500)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed (default: 42)')
     parser.add_argument('--fig_dir', type=str, default='figures',
@@ -357,14 +357,14 @@ def main():
 
     print(f"Analyzing sweep: {args.sweep_dir}")
     end_time_str = f"{args.end_time}ms" if args.end_time else "total_time"
-    print(f"Settings: n_neurons={args.n_neurons}, n_bootstrap={args.n_bootstrap}, bin_size={args.bin_size}ms")
+    print(f"Settings: n_neurons={args.n_neurons}, n_splits={args.n_splits}, bin_size={args.bin_size}ms")
     print(f"Time window: {args.start_from}ms to {end_time_str}")
     print()
 
     results = analyze_sweep(
         args.sweep_dir,
         n_neurons_sample=args.n_neurons,
-        n_bootstrap=args.n_bootstrap,
+        n_splits=args.n_splits,
         seed=args.seed,
         verbose=True,
         bin_size=args.bin_size,

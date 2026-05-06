@@ -32,7 +32,8 @@ BrianLogger.suppress_hierarchy('brian2.groups.group.Group.resolve')
 
 def run_trials_parallel(input_conn, recur_conn, input_times_list, input_spikes_list,
                         n_excite, n_inhib, simulation_time, output_dir,
-                        n_workers=None, Vsi=-75, I_values=None):
+                        n_workers=None, Vsi=-75, I_values=None,
+                        record_currents=False, record_currents_dt=10.0):
     """
     Run multiple trials in parallel using runtime mode.
 
@@ -68,7 +69,8 @@ def run_trials_parallel(input_conn, recur_conn, input_times_list, input_spikes_l
     # Package trial arguments - each trial gets its own I_value
     trial_args = [
         (trial_id, input_times_list[trial_id], input_spikes_list[trial_id],
-         input_conn, recur_conn, n_excite, n_inhib, simulation_time, output_dir, Vsi, I_values[trial_id])
+         input_conn, recur_conn, n_excite, n_inhib, simulation_time, output_dir, Vsi, I_values[trial_id],
+         record_currents, record_currents_dt)
         for trial_id in range(n_trials)
     ]
 
@@ -90,7 +92,8 @@ def run_trials_parallel(input_conn, recur_conn, input_times_list, input_spikes_l
 def _run_trial_worker(args):
     """Worker function for run_trials_parallel."""
     (trial_id, inpt_times, inpt_spikes, input_conn, recur_conn,
-     n_excite, n_inhib, simulation_time, output_dir, Vsi, I_inj) = args
+     n_excite, n_inhib, simulation_time, output_dir, Vsi, I_inj,
+     record_currents, record_currents_dt) = args
 
     pid = os.getpid()
     trial_dir = f'{output_dir}/trial{trial_id}'
@@ -105,7 +108,9 @@ def _run_trial_worker(args):
             simulation_time=simulation_time,
             trial_dir=trial_dir,
             Vsi=Vsi,
-            I_inj=I_inj
+            I_inj=I_inj,
+            record_currents=record_currents,
+            record_currents_dt=record_currents_dt
         )
         return (trial_id, True, pid)
     except Exception as e:
@@ -114,7 +119,8 @@ def _run_trial_worker(args):
 
 
 def run_single_trial(n_excite, n_inhib, input_conn, recur_conn, inputs,
-                     simulation_time, trial_dir, Vsi=-75, I_inj=0.0):
+                     simulation_time, trial_dir, Vsi=-75, I_inj=0.0,
+                     record_currents=True, record_currents_dt=10.0):
     """
     Run a single simulation trial in runtime mode.
 
@@ -127,6 +133,8 @@ def run_single_trial(n_excite, n_inhib, input_conn, recur_conn, inputs,
         trial_dir: Output directory for this trial
         Vsi: Inhibitory reversal potential
         I_inj: Injected current for all neurons (pA), same for E and I
+        record_currents: Whether to record synaptic currents via StateMonitor
+        record_currents_dt: Recording interval in ms for current traces
 
     Returns:
         True if successful
@@ -158,6 +166,9 @@ def run_single_trial(n_excite, n_inhib, input_conn, recur_conn, inputs,
         dgsi/dt=-gsi/taui : siemens
         dgP/dt=-gP/taup : siemens
         I_inj : amp
+        I_rec_exc = gse*(Vse - vm) : amp
+        I_ext = gP*(Vse - vm) : amp
+        I_inh = gsi*(Vsi - vm) : amp
     '''
 
     namespace = {
@@ -224,6 +235,13 @@ def run_single_trial(n_excite, n_inhib, input_conn, recur_conn, inputs,
     e_spike_mon = SpikeMonitor(e_neurons)
     i_spike_mon = SpikeMonitor(i_neurons)
 
+    if record_currents:
+        state_dt = record_currents_dt * ms
+        state_mon_e = StateMonitor(e_neurons, ['I_rec_exc', 'I_ext', 'I_inh'],
+                                   record=True, dt=state_dt)
+        state_mon_i = StateMonitor(i_neurons, ['I_rec_exc', 'I_ext', 'I_inh'],
+                                   record=True, dt=state_dt)
+
     # Run simulation
     run(simulation_time * second)
 
@@ -231,7 +249,19 @@ def run_single_trial(n_excite, n_inhib, input_conn, recur_conn, inputs,
     os.makedirs(trial_dir, exist_ok=True)
     idxs = np.concatenate([np.array(e_spike_mon.i), np.array(i_spike_mon.i) + n_excite])
     times = np.concatenate([np.array(e_spike_mon.t/ms), np.array(i_spike_mon.t/ms)])
-    np.savez(f'{trial_dir}/spike_monitor0.npz', idxs=idxs, times=times)
+    np.savez_compressed(f'{trial_dir}/spike_monitor0.npz', idxs=idxs, times=times)
+
+    if record_currents:
+        np.savez_compressed(f'{trial_dir}/currents_e.npz',
+                 I_rec_exc=np.array(state_mon_e.I_rec_exc / pA),
+                 I_ext=np.array(state_mon_e.I_ext / pA),
+                 I_inh=np.array(state_mon_e.I_inh / pA),
+                 t=np.array(state_mon_e.t / ms))
+        np.savez_compressed(f'{trial_dir}/currents_i.npz',
+                 I_rec_exc=np.array(state_mon_i.I_rec_exc / pA),
+                 I_ext=np.array(state_mon_i.I_ext / pA),
+                 I_inh=np.array(state_mon_i.I_inh / pA),
+                 t=np.array(state_mon_i.t / ms))
 
     return True
 
@@ -261,6 +291,8 @@ def run_parameter_point(param_args):
     Vsi = param_args.get('Vsi', -75)
     I_mu = param_args.get('I_mu', 0.0)
     I_sigma = param_args.get('I_sigma', 0.0)
+    record_currents = param_args.get('record_currents', False)
+    record_currents_dt = param_args.get('record_currents_dt', 10.0)
 
     # Connection params
     ee_p = param_args['ee_p']
@@ -297,7 +329,7 @@ def run_parameter_point(param_args):
 
         # Save connectivity
         os.makedirs(save_dir, exist_ok=True)
-        np.savez(f'{save_dir}/conn_mats.npz', inpt=input_conn, recurrent=recur_conn)
+        np.savez_compressed(f'{save_dir}/conn_mats.npz', inpt=input_conn, recurrent=recur_conn)
 
         # Pre-generate all input spikes and per-trial currents
         print(f"[PID {pid}] Generating input spikes for {n_stimuli} stimuli x {n_trials} trials...")
@@ -322,8 +354,8 @@ def run_parameter_point(param_args):
 
             stim_dir = f'{save_dir}/stim{s}'
             os.makedirs(stim_dir, exist_ok=True)
-            np.savez(f'{stim_dir}/input_times.npz', *inpt_times)
-            np.savez(f'{stim_dir}/input_spikes.npz', *inpt_spikes)
+            np.savez_compressed(f'{stim_dir}/input_times.npz', *inpt_times)
+            np.savez_compressed(f'{stim_dir}/input_spikes.npz', *inpt_spikes)
             np.save(f'{stim_dir}/I_values.npy', I_values)
 
             for t in range(n_trials):
@@ -347,7 +379,9 @@ def run_parameter_point(param_args):
                     simulation_time=simulation_time,
                     trial_dir=trial_dir,
                     Vsi=Vsi,
-                    I_inj=I_inj
+                    I_inj=I_inj,
+                    record_currents=record_currents,
+                    record_currents_dt=record_currents_dt
                 )
                 trials_completed += 1
 

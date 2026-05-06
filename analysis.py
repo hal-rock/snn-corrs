@@ -16,7 +16,7 @@ from typing import Optional, Tuple, Dict, List
 from corr_analyses import (
     calculate_icc,
     calculate_explainable_variance_proportion,
-    bootstrap_all_pairs_variance
+    splithalf_all_pairs_variance
 )
 
 
@@ -224,7 +224,7 @@ def compute_pairwise_correlations(responses: np.ndarray,
 
 def analyze_correlations(responses: np.ndarray,
                         neuron_indices: Optional[np.ndarray] = None,
-                        n_bootstrap: int = 1000,
+                        n_splits: int = 500,
                         verbose: bool = True) -> CorrelationStats:
     """
     Full correlation analysis with variance decomposition.
@@ -232,7 +232,7 @@ def analyze_correlations(responses: np.ndarray,
     Args:
         responses: Array of shape (n_neurons, n_stimuli, n_trials)
         neuron_indices: Subset of neurons to analyze
-        n_bootstrap: Number of bootstrap samples for noise estimation
+        n_splits: Number of split-half splits for noise estimation
         verbose: Print progress
 
     Returns:
@@ -247,10 +247,10 @@ def analyze_correlations(responses: np.ndarray,
     correlations, _ = compute_pairwise_correlations(responses)
     z_corrs = np.arctanh(np.clip(correlations, -0.999, 0.999))
 
-    # Bootstrap noise variance estimation
+    # Split-half noise variance estimation
     if verbose:
-        print(f"Bootstrapping noise variance ({n_bootstrap} samples)...")
-    noise_vars = bootstrap_all_pairs_variance(responses, num_bootstrap_samples=n_bootstrap)
+        print(f"Estimating noise variance via split-half ({n_splits} splits)...")
+    noise_vars = splithalf_all_pairs_variance(responses, num_splits=n_splits)
     mean_noise_var = np.mean(noise_vars)
 
     # Total variance
@@ -419,7 +419,7 @@ class AnalysisResults:
 
 def analyze_parameter_point(directory: str,
                            n_neurons_sample: int = 250,
-                           n_bootstrap: int = 1000,
+                           n_splits: int = 500,
                            analyze_inputs: bool = True,
                            analyze_recurrent: bool = True,
                            seed: Optional[int] = None,
@@ -434,7 +434,7 @@ def analyze_parameter_point(directory: str,
     Args:
         directory: Path to parameter point directory (containing stim0/, stim1/, etc.)
         n_neurons_sample: Number of neurons to randomly sample for analysis
-        n_bootstrap: Bootstrap samples for noise estimation
+        n_splits: Split-half splits for noise estimation
         analyze_inputs: Whether to analyze feedforward input correlations
         analyze_recurrent: Whether to analyze recurrent input correlations
         seed: Random seed for neuron sampling
@@ -506,7 +506,7 @@ def analyze_parameter_point(directory: str,
     if verbose:
         print("  Analyzing response correlations...")
     response_stats = analyze_correlations(
-        all_responses, neuron_indices, n_bootstrap, verbose
+        all_responses, neuron_indices, n_splits, verbose
     )
 
     results = AnalysisResults(
@@ -545,7 +545,7 @@ def analyze_parameter_point(directory: str,
 
         # Full stats for inputs
         results.input_stats = analyze_correlations(
-            input_to_neurons, None, n_bootstrap, verbose
+            input_to_neurons, None, n_splits, verbose
         )
 
     # Analyze recurrent inputs
@@ -584,7 +584,7 @@ def analyze_parameter_point(directory: str,
             recurrent_responses[:, stim, :] = data.sum(axis=2)
 
         results.recurrent_stats = analyze_correlations(
-            recurrent_responses, None, n_bootstrap, verbose
+            recurrent_responses, None, n_splits, verbose
         )
 
     return results
@@ -643,8 +643,8 @@ if __name__ == '__main__':
                         help='Path to parameter point directory')
     parser.add_argument('--n_neurons', type=int, default=250,
                         help='Number of neurons to sample (default: 250)')
-    parser.add_argument('--n_bootstrap', type=int, default=1000,
-                        help='Bootstrap samples (default: 1000)')
+    parser.add_argument('--n_splits', type=int, default=500,
+                        help='Split-half splits for noise estimation (default: 500)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed (default: 42)')
     parser.add_argument('--no_inputs', action='store_true',
@@ -657,7 +657,7 @@ if __name__ == '__main__':
     results = analyze_parameter_point(
         args.directory,
         n_neurons_sample=args.n_neurons,
-        n_bootstrap=args.n_bootstrap,
+        n_splits=args.n_splits,
         analyze_inputs=not args.no_inputs,
         analyze_recurrent=not args.no_recurrent,
         seed=args.seed,

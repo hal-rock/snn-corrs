@@ -37,7 +37,7 @@ from dimension_mappings import (create_dimension_mappings, save_dimension_mappin
 from fastSNN_fastparallel import run_trials_parallel
 
 
-def generate_stimulus_grid(n_dims, n_stimuli_per_dim):
+def generate_stimulus_grid(n_dims, n_stimuli_per_dim, stimulus_range_rad=None):
     """
     Generate combinatorial grid of stimulus centers for multi-dimensional tuning.
 
@@ -47,11 +47,17 @@ def generate_stimulus_grid(n_dims, n_stimuli_per_dim):
     Parameters:
         n_dims: Number of tuning dimensions
         n_stimuli_per_dim: Number of stimuli per dimension
+        stimulus_range_rad: If set, stimuli span [0, stimulus_range_rad] (inclusive)
+                           instead of [0, pi) (exclusive). Useful for crowding stimuli
+                           into a narrow range for fine-discrimination experiments.
 
     Returns:
         List of tuples, each containing bump_center for each dimension
     """
-    per_dim_centers = np.linspace(0, np.pi, n_stimuli_per_dim, endpoint=False)
+    if stimulus_range_rad is not None:
+        per_dim_centers = np.linspace(0, stimulus_range_rad, n_stimuli_per_dim)
+    else:
+        per_dim_centers = np.linspace(0, np.pi, n_stimuli_per_dim, endpoint=False)
     return list(itertools.product(*[per_dim_centers] * n_dims))
 
 
@@ -78,6 +84,7 @@ DEFAULT_CONFIG = {
     "kappa_e": None,        # kappa for connections FROM E cells (EE, IE); None = use kappa
     "kappa_i": None,        # kappa for connections FROM I cells (II, EI); None = use kappa
     "i_multiplier": 10,     # inhibitory weight multiplier
+    "ff_alignment": 0.0,    # rank correlation between excess shared FF input and recurrent weight (0-1)
 
     # Input parameters
     "input_time": 300,      # input duration in ms
@@ -86,12 +93,22 @@ DEFAULT_CONFIG = {
     "input_rate_kappa": 0.0,   # Von Mises kappa for input rate bump (0 = no structure)
     "input_conn_kappa": 0.0,   # Von Mises kappa for input connectivity structure (0 = random)
 
+    # External input silencing: zero out external-input columns for a random subset of cells
+    # (silenced cells receive only recurrent input). Selection is stratified by E/I.
+    "no_input_fraction": 0.0,      # fraction silenced in both E and I (used unless overridden below)
+    "no_input_fraction_e": None,   # overrides no_input_fraction for E cells if set
+    "no_input_fraction_i": None,   # overrides no_input_fraction for I cells if set
+    "no_input_e_boost": 1.0,       # multiplier on incoming recurrent-E weights for silenced cells
+
     # Multi-dimensional tuning parameters
     "n_dims": 1,                       # number of tuning dimensions (1 = single dimension)
     "n_stimuli_per_dim": None,         # stimuli per dimension; if set, total = n_stimuli_per_dim^n_dims
     "kappa_per_dim": None,             # list of kappas per dim for recurrent connectivity
     "input_rate_kappa_per_dim": None,  # list of kappas per dim for input rate bump
     "input_conn_kappa_per_dim": None,  # list of kappas per dim for input connectivity
+
+    # Stimulus range (None = full [0, pi) range; set in degrees to crowd stimuli into narrow band)
+    "stimulus_range_deg": None,
 
     # Simulation parameters
     "simulation_time": 1.05,  # total simulation time in seconds
@@ -103,6 +120,10 @@ DEFAULT_CONFIG = {
     "Vsi": -75,  # inhibitory reversal potential (mV)
     "I_mu": 0.0,   # mean injected current for all neurons (pA)
     "I_sigma": 0.0,  # std of injected current across trials (pA); 0 = constant
+
+    # Current recording
+    "record_currents": False,       # record synaptic currents via StateMonitor
+    "record_currents_dt": 10.0,    # recording interval in ms
 
     # Random seed (None = use system entropy)
     "random_seed": None,
@@ -140,6 +161,12 @@ SWEEPABLE_PARAMS = {
     "n_input": int,
     "n_dims": int,
     "n_stimuli_per_dim": int,
+    "ff_alignment": float,
+    "stimulus_range_deg": float,
+    "no_input_fraction": float,
+    "no_input_fraction_e": float,
+    "no_input_fraction_i": float,
+    "no_input_e_boost": float,
 }
 
 
@@ -255,14 +282,22 @@ def run_single_sweep_point(params, output_dir, run_name):
     input_conn_kappa_per_dim = params.get('input_conn_kappa_per_dim')
 
     # Determine stimulus configuration
+    stimulus_range_deg = params.get('stimulus_range_deg')
+    stimulus_range_rad = np.deg2rad(stimulus_range_deg) if stimulus_range_deg is not None else None
+
     if n_stimuli_per_dim is not None:
         n_stimuli = n_stimuli_per_dim ** n_dims
-        stimulus_centers = generate_stimulus_grid(n_dims, n_stimuli_per_dim)
+        stimulus_centers = generate_stimulus_grid(n_dims, n_stimuli_per_dim,
+                                                  stimulus_range_rad=stimulus_range_rad)
     else:
         n_stimuli = params['n_stimuli']
         if n_dims == 1:
             # Single dimension - wrap bump_centers in tuples for uniform interface
-            stimulus_centers = [(c,) for c in np.linspace(0, np.pi, n_stimuli, endpoint=False)]
+            if stimulus_range_rad is not None:
+                centers = np.linspace(0, stimulus_range_rad, n_stimuli)
+            else:
+                centers = np.linspace(0, np.pi, n_stimuli, endpoint=False)
+            stimulus_centers = [(c,) for c in centers]
         else:
             raise ValueError("n_stimuli_per_dim is required when n_dims > 1")
 
@@ -299,6 +334,16 @@ def run_single_sweep_point(params, output_dir, run_name):
             n_input, n_cells, params['pei_p'], params['w_mu'], params['w_sd']
         )
 
+    # Compute input probability matrix for ff_alignment (if needed)
+    ff_alignment = params.get('ff_alignment', 0.0)
+    input_prob = None
+    if ff_alignment > 1e-10:
+        input_prob = connmat.compute_input_prob_matrix(
+            n_input, n_cells, params['pei_p'], input_conn_kappa,
+            n_dims=n_dims, n_e=n_excite, n_i=n_inhib,
+            dim_mappings=dim_mappings, kappa_per_dim=input_conn_kappa_per_dim
+        )
+
     recur_conn = connmat.gen_ring_conn(
         n_excite, n_inhib,
         params['ii_p'], params['ei_p'], params['ie_p'], params['ee_p'],
@@ -309,12 +354,47 @@ def run_single_sweep_point(params, output_dir, run_name):
         kappa_i=params.get('kappa_i'),
         n_dims=n_dims,
         dim_mappings=dim_mappings,
-        kappa_per_dim=kappa_per_dim
+        kappa_per_dim=kappa_per_dim,
+        ff_alignment=ff_alignment,
+        input_conn=input_conn,
+        input_prob=input_prob
     )
+
+    # Optionally silence external input to a random subset of cells (stratified E/I).
+    # Done after ff_alignment computation so alignment uses the unmodified input_conn.
+    no_input_fraction = params.get('no_input_fraction', 0.0) or 0.0
+    frac_e = params.get('no_input_fraction_e')
+    frac_i = params.get('no_input_fraction_i')
+    if frac_e is None:
+        frac_e = no_input_fraction
+    if frac_i is None:
+        frac_i = no_input_fraction
+    if frac_e > 0 or frac_i > 0:
+        n_e_silent = int(round(frac_e * n_excite))
+        n_i_silent = int(round(frac_i * n_inhib))
+        e_silent = np.random.choice(n_excite, n_e_silent, replace=False)
+        i_silent = n_excite + np.random.choice(n_inhib, n_i_silent, replace=False)
+        silent_idx = np.concatenate([e_silent, i_silent])
+        input_conn[:, silent_idx] = 0.0
+        no_input_mask = np.zeros(n_cells, dtype=bool)
+        no_input_mask[silent_idx] = True
+        print(f"  Silencing external input to {n_e_silent}/{n_excite} E + "
+              f"{n_i_silent}/{n_inhib} I cells")
+
+        # Optionally compensate by boosting incoming recurrent-E weights to silenced cells.
+        # Recurrent matrix is post (rows) x pre (cols); E pre-cells are columns [:n_excite].
+        no_input_e_boost = params.get('no_input_e_boost', 1.0) or 1.0
+        if no_input_e_boost != 1.0:
+            recur_conn[np.ix_(silent_idx, np.arange(n_excite))] *= no_input_e_boost
+            print(f"  Boosting recurrent-E weights into silenced cells by {no_input_e_boost}x")
+    else:
+        no_input_mask = None
 
     # Save connectivity and dimension mappings
     os.makedirs(output_dir, exist_ok=True)
-    np.savez(f'{output_dir}/conn_mats.npz', inpt=input_conn, recurrent=recur_conn)
+    np.savez_compressed(f'{output_dir}/conn_mats.npz', inpt=input_conn, recurrent=recur_conn)
+    if no_input_mask is not None:
+        np.save(f'{output_dir}/no_input_mask.npy', no_input_mask)
 
     if dim_mappings is not None:
         save_dimension_mappings(dim_mappings, f'{output_dir}/dim_mappings.npz')
@@ -377,8 +457,8 @@ def run_single_sweep_point(params, output_dir, run_name):
         )
 
         # Save input spikes and rates
-        np.savez(f'{stim_dir}/input_times.npz', *inpt_times)
-        np.savez(f'{stim_dir}/input_spikes.npz', *inpt_spikes)
+        np.savez_compressed(f'{stim_dir}/input_times.npz', *inpt_times)
+        np.savez_compressed(f'{stim_dir}/input_spikes.npz', *inpt_spikes)
         np.save(f'{stim_dir}/input_rates.npy', input_rates)
 
         # Run trials in parallel
@@ -393,7 +473,9 @@ def run_single_sweep_point(params, output_dir, run_name):
             output_dir=stim_dir,
             n_workers=n_workers,
             Vsi=params['Vsi'],
-            I_values=I_values
+            I_values=I_values,
+            record_currents=params.get('record_currents', False),
+            record_currents_dt=params.get('record_currents_dt', 10.0),
         )
 
         successful = sum(1 for _, success, _ in results if success)

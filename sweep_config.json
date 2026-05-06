@@ -2,7 +2,10 @@
     "n_trials": 100,
     "n_stimuli": 3,
     "n_workers": 16,
+    "runs": 10,
 
-    "input_time": "100:1000:100",
+    "input_time": "100:1000:150",
+    "input_rate_kappa": 0.2,
+    "input_conn_kappa": 0.2,
     "kappa": "0.0:2.0:0.2"
 }

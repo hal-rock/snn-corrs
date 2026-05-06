@@ -17,14 +17,14 @@ from sklearn.svm import LinearSVC
 from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis
 from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA
+from sklearn.decomposition import PCA, FactorAnalysis
 from sklearn.pipeline import Pipeline
 
 from analysis import load_spikes_vectorized, load_params, get_n_stimuli
 
 
 def load_responses(directory: str, params: dict, n_stimuli: int = None,
-                   duration: float = None, start_from: float = 50) -> tuple[np.ndarray, np.ndarray]:
+                   duration: float = None, start_from: float = 500) -> tuple[np.ndarray, np.ndarray]:
     """
     Load spike count responses for all neurons across all stimuli/trials.
 
@@ -134,7 +134,9 @@ def decode_with_n_features_qda(X_train: np.ndarray, y_train: np.ndarray,
                                 n_features: int, feature_indices: np.ndarray,
                                 shrinkage_values: np.ndarray, cv_folds: int = 5,
                                 random_state: int = 42,
-                                covariance_only: bool = False) -> dict:
+                                covariance_only: bool = False,
+                                fa_covariance: bool = False,
+                                n_factors: int = 2) -> dict:
     """
     Train and evaluate QDA decoder using a subset of features (neurons or PCs).
 
@@ -151,6 +153,9 @@ def decode_with_n_features_qda(X_train: np.ndarray, y_train: np.ndarray,
         random_state: Random seed
         covariance_only: If True, ignore class mean differences and classify
                          based only on covariance structure
+        fa_covariance: If True, use Factor Analysis to estimate per-class
+                       covariances instead of CV'd shrinkage
+        n_factors: Number of latent factors for FactorAnalysis
 
     Returns:
         Dict with best_shrinkage, cv_accuracy, test_accuracy
@@ -164,6 +169,35 @@ def decode_with_n_features_qda(X_train: np.ndarray, y_train: np.ndarray,
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train_sub)
     X_test_scaled = scaler.transform(X_test_sub)
+
+    if fa_covariance:
+        # Fit QDA with arbitrary shrinkage to get means/priors, then replace covariances
+        final_qda = QuadraticDiscriminantAnalysis(solver='eigen', shrinkage=0.5)
+        final_qda.fit(X_train_scaled, y_train)
+
+        classes = final_qda.classes_
+        for k, cls in enumerate(classes):
+            X_cls = X_train_scaled[y_train == cls]
+            n_factors_use = min(n_factors, X_cls.shape[1], X_cls.shape[0] - 1)
+            fa = FactorAnalysis(n_components=n_factors_use, random_state=random_state)
+            fa.fit(X_cls)
+            # Reconstruct covariance: W @ W.T + diag(psi)
+            cov = fa.components_.T @ fa.components_ + np.diag(fa.noise_variance_)
+            eigvals, eigvecs = np.linalg.eigh(cov)
+            # eigh returns ascending order; QDA expects descending
+            final_qda.rotations_[k] = eigvecs[:, ::-1]
+            final_qda.scalings_[k] = eigvals[::-1]
+
+        if covariance_only:
+            final_qda.means_ = np.zeros_like(final_qda.means_)
+
+        test_accuracy = final_qda.score(X_test_scaled, y_test)
+
+        return {
+            'best_shrinkage': None,
+            'cv_accuracy': None,
+            'test_accuracy': test_accuracy
+        }
 
     # Manual cross-validation over shrinkage
     cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
@@ -228,6 +262,11 @@ def main():
                              'Default: use full run (~950ms)')
     parser.add_argument('--covariance_only', action='store_true',
                         help='QDA uses only covariance differences, ignoring class mean differences')
+    parser.add_argument('--fa_covariance', action='store_true',
+                        help='Use Factor Analysis to estimate per-class covariances for QDA '
+                             '(replaces shrinkage CV)')
+    parser.add_argument('--n_factors', type=int, default=2,
+                        help='Number of latent factors for Factor Analysis covariance (default: 2)')
     args = parser.parse_args()
 
     fig_dir = Path("figures")
@@ -236,13 +275,13 @@ def main():
     np.random.seed(args.seed)
 
     # Feature counts to test (will be filtered based on available features)
-    feature_counts = [5, 10, 20, 50, 100, 200, 500, 1000, 2000]
+    feature_counts = [5, 10, 20, 50, 100, 200, 500]#, 1000]
 
     # Regularization values to try (log-spaced for SVM)
     C_values = np.logspace(-4, 2, 13)
 
     # Shrinkage values to try for QDA (linear-spaced, 0-1)
-    shrinkage_values = np.linspace(0.1, 1.0, 10)
+    shrinkage_values = np.linspace(0.003, 1.0, 10)
 
     # Cross-validation settings
     cv_folds = 5
@@ -426,7 +465,10 @@ def main():
 
     print(f"\nTesting {len(feature_counts)} {feature_label} counts: {feature_counts}")
     print(f"SVM C values: {C_values}")
-    print(f"QDA shrinkage values: {shrinkage_values}")
+    if args.fa_covariance:
+        print(f"QDA covariance: Factor Analysis with {args.n_factors} factors")
+    else:
+        print(f"QDA shrinkage values: {shrinkage_values}")
     print()
 
     # Run decoding for each feature count
@@ -448,18 +490,28 @@ def main():
               f"Test acc: {svm_result['test_accuracy']:.1%}")
 
         # QDA
-        qda_label = "QDA (cov-only)" if args.covariance_only else "QDA"
+        if args.fa_covariance:
+            qda_label = f"QDA-FA(k={args.n_factors})"
+        elif args.covariance_only:
+            qda_label = "QDA (cov-only)"
+        else:
+            qda_label = "QDA"
         print(f"  {qda_label}: ", end="", flush=True)
         qda_result = decode_with_n_features_qda(
             X_train_use, y_train, X_test_use, y_test,
             n_features, feature_order, shrinkage_values,
             cv_folds=cv_folds, random_state=args.seed,
-            covariance_only=args.covariance_only
+            covariance_only=args.covariance_only,
+            fa_covariance=args.fa_covariance,
+            n_factors=args.n_factors
         )
         qda_result['n_features'] = n_features
         qda_results.append(qda_result)
-        print(f"CV acc: {qda_result['cv_accuracy']:.1%}, "
-              f"Test acc: {qda_result['test_accuracy']:.1%}")
+        if qda_result['cv_accuracy'] is not None:
+            print(f"CV acc: {qda_result['cv_accuracy']:.1%}, "
+                  f"Test acc: {qda_result['test_accuracy']:.1%}")
+        else:
+            print(f"Test acc: {qda_result['test_accuracy']:.1%}")
 
     # Extract arrays for plotting
     n_features_arr = np.array([r['n_features'] for r in svm_results])
@@ -469,7 +521,12 @@ def main():
     # Plot results - single plot comparing both methods
     fig, ax = plt.subplots(figsize=(8, 6))
 
-    qda_plot_label = "QDA (cov-only)" if args.covariance_only else "QDA"
+    if args.fa_covariance:
+        qda_plot_label = f"QDA-FA(k={args.n_factors})"
+    elif args.covariance_only:
+        qda_plot_label = "QDA (cov-only)"
+    else:
+        qda_plot_label = "QDA"
     ax.plot(n_features_arr, svm_test_acc * 100, 'o-', label='Linear SVM', markersize=8)
     ax.plot(n_features_arr, qda_test_acc * 100, 's-', label=qda_plot_label, markersize=8)
     ax.axhline(100 / n_stimuli, color='gray', linestyle='--', label='Chance')
@@ -477,7 +534,12 @@ def main():
     ax.set_xlabel(f'Number of {feature_label}')
     ax.set_ylabel('Test Accuracy (%)')
     mode_str = "PC space" if args.use_pca else "neuron space"
-    qda_title_str = "QDA (covariance-only)" if args.covariance_only else "QDA"
+    if args.fa_covariance:
+        qda_title_str = f"QDA-FA(k={args.n_factors})"
+    elif args.covariance_only:
+        qda_title_str = "QDA (covariance-only)"
+    else:
+        qda_title_str = "QDA"
     ax.set_title(f'Stimulus Decoding: Linear SVM vs {qda_title_str} ({mode_str})\n'
                  f'({n_stimuli} stimuli, {n_trials} trials/stimulus)')
     ax.legend()
@@ -486,8 +548,13 @@ def main():
 
     plt.tight_layout()
 
-    cov_suffix = '_covonly' if args.covariance_only else ''
-    fig_name = f'decoding_vs_pcs{cov_suffix}.png' if args.use_pca else f'decoding_vs_neurons{cov_suffix}.png'
+    if args.fa_covariance:
+        cov_suffix = '_fa'
+    elif args.covariance_only:
+        cov_suffix = '_covonly'
+    else:
+        cov_suffix = ''
+    fig_name = f'{args.duration}ms_decoding_vs_pcs_{n_stimuli}stim{cov_suffix}.png' if args.use_pca else f'{args.duration}ms_decoding_vs_neurons_{n_stimuli}stim{cov_suffix}.png'
     fig_path = fig_dir / fig_name
     if args.save_fig:
         plt.savefig(fig_path, dpi=150, bbox_inches='tight')
@@ -495,11 +562,21 @@ def main():
 
     # Print summary table
     print("\n" + "="*80)
-    qda_mode_str = "COVARIANCE-ONLY " if args.covariance_only else ""
+    if args.fa_covariance:
+        qda_mode_str = f"FA(k={args.n_factors}) "
+    elif args.covariance_only:
+        qda_mode_str = "COVARIANCE-ONLY "
+    else:
+        qda_mode_str = ""
     print(f"DECODING RESULTS SUMMARY ({feature_label.upper()}, {qda_mode_str}QDA)")
     print("="*80)
     header_label = "N PCs" if args.use_pca else "N neurons"
-    qda_header = "QDA(cov)" if args.covariance_only else "QDA Test"
+    if args.fa_covariance:
+        qda_header = f"QDA-FA(k={args.n_factors})"
+    elif args.covariance_only:
+        qda_header = "QDA(cov)"
+    else:
+        qda_header = "QDA Test"
     print(f"{header_label:>10} {'SVM Test':>12} {qda_header:>12} {'Difference':>12}")
     print("-"*80)
     for svm_r, qda_r in zip(svm_results, qda_results):
@@ -511,7 +588,12 @@ def main():
     # Best results
     svm_best_idx = np.argmax(svm_test_acc)
     qda_best_idx = np.argmax(qda_test_acc)
-    qda_best_label = "QDA (cov-only)" if args.covariance_only else "QDA"
+    if args.fa_covariance:
+        qda_best_label = f"QDA-FA(k={args.n_factors})"
+    elif args.covariance_only:
+        qda_best_label = "QDA (cov-only)"
+    else:
+        qda_best_label = "QDA"
     print(f"\nBest SVM: {svm_test_acc[svm_best_idx]:.1%} with {n_features_arr[svm_best_idx]} {feature_label}")
     print(f"Best {qda_best_label}: {qda_test_acc[qda_best_idx]:.1%} with {n_features_arr[qda_best_idx]} {feature_label}")
 
@@ -523,7 +605,8 @@ def main():
         print(f"\nVariance explained at best SVM ({svm_best_n} PCs): {cumvar[svm_best_n-1]:.1f}%")
         print(f"Variance explained at best {qda_best_label} ({qda_best_n} PCs): {cumvar[qda_best_n-1]:.1f}%")
 
-    plt.show()
+    if not args.save_fig:
+        plt.show()
 
 
 if __name__ == '__main__':
