@@ -69,8 +69,15 @@ def compute_input_prob_matrix(n_inputs, n_targets, prob_conn, kappa,
         if kappa < 1e-5:
             return np.full((n_inputs, n_targets), prob_conn)
 
+        # E and I targets must each tile a full [0, pi) ring (matching
+        # gen_ring_conn / gen_ring_input_conn), not share a single linspace.
+        assert n_e is not None and n_i is not None, \
+            "n_e and n_i are required for structured (kappa > 0) input prob matrix"
         theta_input = np.linspace(0, np.pi, n_inputs, endpoint=False)
-        theta_target = np.linspace(0, np.pi, n_targets, endpoint=False)
+        theta_target = np.concatenate([
+            np.linspace(0, np.pi, n_e, endpoint=False),
+            np.linspace(0, np.pi, n_i, endpoint=False),
+        ])
         T_target, T_input = np.meshgrid(theta_target, theta_input)
         diff_scaled = 2 * (T_target - T_input)
         P = vonmises.pdf(diff_scaled, kappa)
@@ -355,7 +362,7 @@ def gen_input_conn(n_inputs, n_targets, prob_conn, w_mu, w_sd): # I think shape 
 
 
 def gen_ring_input_conn(n_inputs, n_targets, prob_conn, w_mu, w_sd, kappa,
-                        n_dims=1, dim_mappings=None, kappa_per_dim=None):
+                        n_e=None, n_dims=1, dim_mappings=None, kappa_per_dim=None):
     '''
     Generates input connectivity with ring-like tuning structure.
 
@@ -376,6 +383,12 @@ def gen_ring_input_conn(n_inputs, n_targets, prob_conn, w_mu, w_sd, kappa,
         Concentration parameter for Von Mises distribution.
         kappa = 0 implies uniform random connectivity (equivalent to gen_input_conn).
         Higher kappa implies sharper tuning (connections mostly between similar orientations).
+    n_e : int, optional
+        Number of excitatory targets (the first n_e of n_targets; the remaining
+        n_targets - n_e are inhibitory). Required for structured (kappa > 0)
+        single-dimension connectivity so that E and I each tile a full [0, pi)
+        ring, consistent with gen_ring_conn. If None, derived from dim_mappings
+        when available.
     n_dims : int, optional
         Number of tuning dimensions. Default 1 for backward compatibility.
     dim_mappings : DimensionMappings, optional
@@ -391,15 +404,31 @@ def gen_ring_input_conn(n_inputs, n_targets, prob_conn, w_mu, w_sd, kappa,
     if n_dims == 1:
         # Single-dimension code path (original behavior)
 
-        # Assign preferred orientations (0 to pi) to both populations
-        theta_input = np.linspace(0, np.pi, n_inputs, endpoint=False)
-        theta_target = np.linspace(0, np.pi, n_targets, endpoint=False)
-
         # Calculate connection probability matrix
         if kappa < 1e-5:
             # Uniform case (kappa ~ 0)
             P = np.full((n_inputs, n_targets), prob_conn)
         else:
+            # E and I targets must EACH tile a full [0, pi) ring, matching
+            # gen_ring_conn. Laying all n_targets on a single linspace(0, pi)
+            # would squash the I cells into the [n_e/n_targets * pi, pi) sub-arc,
+            # making feedforward tuning inconsistent with recurrent tuning and
+            # breaking rotational symmetry: the I population would only receive
+            # well-tuned input for stimuli near that sub-arc, so different
+            # stimuli would evoke systematically different total activity.
+            if n_e is None and dim_mappings is not None:
+                n_e = dim_mappings.n_e
+            assert n_e is not None, (
+                "n_e is required for structured (kappa > 0) 1D input "
+                "connectivity; pass n_e=n_excite")
+            n_i = n_targets - n_e
+
+            theta_input = np.linspace(0, np.pi, n_inputs, endpoint=False)
+            theta_target = np.concatenate([
+                np.linspace(0, np.pi, n_e, endpoint=False),
+                np.linspace(0, np.pi, n_i, endpoint=False),
+            ])
+
             # Grid of orientations: T_target[i,j] = theta_target[j], T_input[i,j] = theta_input[i]
             T_target, T_input = np.meshgrid(theta_target, theta_input)
 

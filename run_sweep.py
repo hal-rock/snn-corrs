@@ -325,6 +325,7 @@ def run_single_sweep_point(params, output_dir, run_name):
         input_conn = connmat.gen_ring_input_conn(
             n_input, n_cells, params['pei_p'], params['w_mu'], params['w_sd'],
             input_conn_kappa,
+            n_e=n_excite,
             n_dims=n_dims,
             dim_mappings=dim_mappings,
             kappa_per_dim=input_conn_kappa_per_dim

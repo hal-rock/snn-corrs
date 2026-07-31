@@ -29,14 +29,43 @@ def format_param_value(val) -> str:
     return str(val)
 
 
-def discover_sweep_structure(sweep_dir: str) -> Tuple[str, List[float], str, List[float]]:
+def _parse_param_dirs(dirs, pattern) -> Tuple[Optional[str], List[float]]:
+    """Parse a list of directories named ``<param>_<value>`` into (name, values).
+
+    Uses a greedy match for the name to handle underscores in variable names
+    (e.g., "input_time_100" -> name="input_time", value="100").
+    """
+    name = None
+    values = []
+    for d in dirs:
+        match = pattern.match(d.name)
+        if match:
+            n, val = match.groups()
+            if name is None:
+                name = n
+            elif n != name:
+                continue  # Skip non-matching directories
+            try:
+                values.append(float(val))
+            except ValueError:
+                values.append(val)
+    return name, sorted(set(values))
+
+
+def discover_sweep_structure(sweep_dir: str) -> Tuple[Optional[str], List, Optional[str], List]:
     """
     Discover the parameter sweep structure from directory names.
 
-    Expects structure like: sweep_dir/param1_val1/param2_val2/
+    Handles two layouts:
+    - 2D sweep: ``sweep_dir/param1_val1/param2_val2/stim*/...``
+    - 1D sweep: ``sweep_dir/param1_val1/stim*/...`` (single swept parameter)
+
+    For a 1D sweep the swept parameter is returned as param2 (the x-axis) with a
+    single placeholder param1 row, so downstream code renders it as one row.
 
     Returns:
         (param1_name, param1_values, param2_name, param2_values)
+        For 1D sweeps, param1_name is None and param1_values is [None].
     """
     sweep_path = Path(sweep_dir)
 
@@ -46,49 +75,23 @@ def discover_sweep_structure(sweep_dir: str) -> Tuple[str, List[float], str, Lis
     if not level1_dirs:
         raise ValueError(f"No subdirectories found in {sweep_dir}")
 
-    # Parse first parameter name and values
-    # Use greedy match for name to handle underscores in variable names
-    # e.g., "input_time_100" -> name="input_time", value="100"
     pattern = re.compile(r'^(.+)_([^_]+)$')
-    param1_name = None
-    param1_values = []
 
-    for d in level1_dirs:
-        match = pattern.match(d.name)
-        if match:
-            name, val = match.groups()
-            if param1_name is None:
-                param1_name = name
-            elif name != param1_name:
-                continue  # Skip non-matching directories
-            try:
-                param1_values.append(float(val))
-            except ValueError:
-                param1_values.append(val)
+    # Detect 1D vs 2D: if the first-level dirs contain stim* directories directly,
+    # there is no second parameter level and this is a 1D sweep.
+    is_1d = any(level1_dirs[0].glob("stim*"))
 
-    # Get second-level directories (second parameter)
-    sample_level1 = level1_dirs[0]
-    level2_dirs = sorted([d for d in sample_level1.iterdir() if d.is_dir()])
+    swept_name, swept_values = _parse_param_dirs(level1_dirs, pattern)
 
-    param2_name = None
-    param2_values = []
+    if is_1d:
+        # Single-row layout: swept param becomes the x-axis (param2),
+        # with a placeholder param1 providing the single row.
+        return None, [None], swept_name, swept_values
 
-    for d in level2_dirs:
-        match = pattern.match(d.name)
-        if match:
-            name, val = match.groups()
-            if param2_name is None:
-                param2_name = name
-            elif name != param2_name:
-                continue
-            try:
-                param2_values.append(float(val))
-            except ValueError:
-                param2_values.append(val)
-
-    # Sort values
-    param1_values = sorted(set(param1_values))
-    param2_values = sorted(set(param2_values))
+    # 2D sweep: swept param is param1 (rows), second level is param2 (columns)
+    param1_name, param1_values = swept_name, swept_values
+    level2_dirs = sorted([d for d in level1_dirs[0].iterdir() if d.is_dir()])
+    param2_name, param2_values = _parse_param_dirs(level2_dirs, pattern)
 
     return param1_name, param1_values, param2_name, param2_values
 
@@ -130,13 +133,19 @@ def analyze_sweep(sweep_dir: str,
     # Discover structure
     param1_name, param1_values, param2_name, param2_values = discover_sweep_structure(sweep_dir)
 
+    is_1d = param1_name is None
+
     n1 = len(param1_values)
     n2 = len(param2_values)
 
     if verbose:
-        print(f"Sweep structure: {param1_name} ({n1} values) x {param2_name} ({n2} values)")
-        print(f"  {param1_name}: {param1_values}")
-        print(f"  {param2_name}: {param2_values}")
+        if is_1d:
+            print(f"Sweep structure (1D): {param2_name} ({n2} values)")
+            print(f"  {param2_name}: {param2_values}")
+        else:
+            print(f"Sweep structure: {param1_name} ({n1} values) x {param2_name} ({n2} values)")
+            print(f"  {param1_name}: {param1_values}")
+            print(f"  {param2_name}: {param2_values}")
 
     # Initialize result arrays
     mean_corr = np.full((n1, n2), np.nan)
@@ -152,7 +161,10 @@ def analyze_sweep(sweep_dir: str,
     for i, v1 in enumerate(param1_values):
         for j, v2 in enumerate(param2_values):
             # Construct directory path
-            dir_name = sweep_path / f"{param1_name}_{format_param_value(v1)}" / f"{param2_name}_{format_param_value(v2)}"
+            if is_1d:
+                dir_name = sweep_path / f"{param2_name}_{format_param_value(v2)}"
+            else:
+                dir_name = sweep_path / f"{param1_name}_{format_param_value(v1)}" / f"{param2_name}_{format_param_value(v2)}"
 
             if not dir_name.exists():
                 if verbose:
@@ -178,7 +190,10 @@ def analyze_sweep(sweep_dir: str,
 
             try:
                 if verbose:
-                    print(f"  [{analyzed+1}/{total_points}] Analyzing {param1_name}={v1}, {param2_name}={v2}...")
+                    if is_1d:
+                        print(f"  [{analyzed+1}/{total_points}] Analyzing {param2_name}={v2}...")
+                    else:
+                        print(f"  [{analyzed+1}/{total_points}] Analyzing {param1_name}={v1}, {param2_name}={v2}...")
 
                 results = analyze_parameter_point(
                     str(dir_name),
@@ -235,6 +250,9 @@ def plot_heatmaps(results: dict, fig_dir: str = "figures"):
     param1_values = results['param1_values']
     param2_values = results['param2_values']
 
+    # 1D sweeps have no first parameter; the swept param lives on the x-axis (param2)
+    is_1d = param1_name is None
+
     metrics = [
         ('mean_corr', 'Mean Spike Correlation', 'RdBu_r'),
         ('noise_frac', 'Noise Fraction', 'viridis_r'),
@@ -242,8 +260,8 @@ def plot_heatmaps(results: dict, fig_dir: str = "figures"):
         ('stim_to_noise_ratio', 'Stimulus/Noise Variance Ratio', 'plasma'),
     ]
 
-    # Create combined figure
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    # Create combined figure (shorter rows for the single-row 1D layout)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 6) if is_1d else (12, 10))
     axes = axes.flatten()
 
     for ax, (key, title, cmap) in zip(axes, metrics):
@@ -258,11 +276,14 @@ def plot_heatmaps(results: dict, fig_dir: str = "figures"):
         ax.set_xticks(range(len(param2_values)))
         ax.set_xticklabels([f"{v:.0f}" if isinstance(v, float) and v.is_integer() else f"{v}"
                            for v in param2_values], rotation=45, ha='right')
-        ax.set_yticks(range(len(param1_values)))
-        ax.set_yticklabels([f"{v}" for v in param1_values])
+        if is_1d:
+            ax.set_yticks([])
+        else:
+            ax.set_yticks(range(len(param1_values)))
+            ax.set_yticklabels([f"{v}" for v in param1_values])
+            ax.set_ylabel(param1_name)
 
         ax.set_xlabel(param2_name)
-        ax.set_ylabel(param1_name)
         ax.set_title(title)
 
         # Add colorbar
@@ -282,7 +303,10 @@ def plot_heatmaps(results: dict, fig_dir: str = "figures"):
                     ax.text(j, i, text, ha='center', va='center',
                             fontsize=7, color=color)
 
-    plt.suptitle(f'Parameter Sweep: {param1_name} vs {param2_name}', fontsize=14)
+    if is_1d:
+        plt.suptitle(f'Parameter Sweep: {param2_name}', fontsize=14)
+    else:
+        plt.suptitle(f'Parameter Sweep: {param1_name} vs {param2_name}', fontsize=14)
     plt.tight_layout()
 
     combined_path = fig_path / 'sweep_heatmaps.png'
@@ -291,7 +315,7 @@ def plot_heatmaps(results: dict, fig_dir: str = "figures"):
 
     # Also save individual heatmaps
     for key, title, cmap in metrics:
-        fig, ax = plt.subplots(figsize=(8, 6))
+        fig, ax = plt.subplots(figsize=(8, 3) if is_1d else (8, 6))
         data = results[key]
         masked_data = np.ma.masked_invalid(data)
 
@@ -300,11 +324,14 @@ def plot_heatmaps(results: dict, fig_dir: str = "figures"):
         ax.set_xticks(range(len(param2_values)))
         ax.set_xticklabels([f"{v:.0f}" if isinstance(v, float) and v.is_integer() else f"{v}"
                            for v in param2_values], rotation=45, ha='right')
-        ax.set_yticks(range(len(param1_values)))
-        ax.set_yticklabels([f"{v}" for v in param1_values])
+        if is_1d:
+            ax.set_yticks([])
+        else:
+            ax.set_yticks(range(len(param1_values)))
+            ax.set_yticklabels([f"{v}" for v in param1_values])
+            ax.set_ylabel(param1_name)
 
         ax.set_xlabel(param2_name)
-        ax.set_ylabel(param1_name)
         ax.set_title(title)
 
         cbar = plt.colorbar(im, ax=ax)

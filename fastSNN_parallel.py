@@ -334,7 +334,7 @@ if __name__ == '__main__':
 
     # Generate input connectivity (shared across all runs)
     if input_conn_kappa > 1e-5:
-        input_conn = connmat.gen_ring_input_conn(n_input, n_cells, pei_p, w_mu, w_sd, input_conn_kappa)
+        input_conn = connmat.gen_ring_input_conn(n_input, n_cells, pei_p, w_mu, w_sd, input_conn_kappa, n_e=n_excite)
     else:
         input_conn = connmat.gen_input_conn(n_input, n_cells, pei_p, w_mu, w_sd)
 

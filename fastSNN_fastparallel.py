@@ -33,7 +33,8 @@ BrianLogger.suppress_hierarchy('brian2.groups.group.Group.resolve')
 def run_trials_parallel(input_conn, recur_conn, input_times_list, input_spikes_list,
                         n_excite, n_inhib, simulation_time, output_dir,
                         n_workers=None, Vsi=-75, I_values=None,
-                        record_currents=False, record_currents_dt=10.0):
+                        record_currents=False, record_currents_dt=10.0,
+                        vm_init_e_list=None, vm_init_i_list=None):
     """
     Run multiple trials in parallel using runtime mode.
 
@@ -52,6 +53,10 @@ def run_trials_parallel(input_conn, recur_conn, input_times_list, input_spikes_l
         n_workers: Number of parallel workers (default: CPU count)
         Vsi: Inhibitory reversal potential
         I_values: Array of injected currents (pA), one per trial (same for E and I)
+        vm_init_e_list: Optional list of (n_excite,) initial-vm arrays in mV, one per
+            trial. If None, each trial draws random vm (original behavior).
+        vm_init_i_list: Optional list of (n_inhib,) initial-vm arrays in mV, one per
+            trial. If None, each trial draws random vm (original behavior).
 
     Returns:
         List of (trial_id, success, pid) tuples
@@ -66,11 +71,13 @@ def run_trials_parallel(input_conn, recur_conn, input_times_list, input_spikes_l
     if I_values is None:
         I_values = np.zeros(n_trials)
 
-    # Package trial arguments - each trial gets its own I_value
+    # Package trial arguments - each trial gets its own I_value (and optional vm bank)
     trial_args = [
         (trial_id, input_times_list[trial_id], input_spikes_list[trial_id],
          input_conn, recur_conn, n_excite, n_inhib, simulation_time, output_dir, Vsi, I_values[trial_id],
-         record_currents, record_currents_dt)
+         record_currents, record_currents_dt,
+         vm_init_e_list[trial_id] if vm_init_e_list is not None else None,
+         vm_init_i_list[trial_id] if vm_init_i_list is not None else None)
         for trial_id in range(n_trials)
     ]
 
@@ -93,7 +100,7 @@ def _run_trial_worker(args):
     """Worker function for run_trials_parallel."""
     (trial_id, inpt_times, inpt_spikes, input_conn, recur_conn,
      n_excite, n_inhib, simulation_time, output_dir, Vsi, I_inj,
-     record_currents, record_currents_dt) = args
+     record_currents, record_currents_dt, vm_init_e, vm_init_i) = args
 
     pid = os.getpid()
     trial_dir = f'{output_dir}/trial{trial_id}'
@@ -110,7 +117,9 @@ def _run_trial_worker(args):
             Vsi=Vsi,
             I_inj=I_inj,
             record_currents=record_currents,
-            record_currents_dt=record_currents_dt
+            record_currents_dt=record_currents_dt,
+            vm_init_e=vm_init_e,
+            vm_init_i=vm_init_i
         )
         return (trial_id, True, pid)
     except Exception as e:
@@ -120,7 +129,8 @@ def _run_trial_worker(args):
 
 def run_single_trial(n_excite, n_inhib, input_conn, recur_conn, inputs,
                      simulation_time, trial_dir, Vsi=-75, I_inj=0.0,
-                     record_currents=True, record_currents_dt=10.0):
+                     record_currents=True, record_currents_dt=10.0,
+                     vm_init_e=None, vm_init_i=None):
     """
     Run a single simulation trial in runtime mode.
 
@@ -135,6 +145,10 @@ def run_single_trial(n_excite, n_inhib, input_conn, recur_conn, inputs,
         I_inj: Injected current for all neurons (pA), same for E and I
         record_currents: Whether to record synaptic currents via StateMonitor
         record_currents_dt: Recording interval in ms for current traces
+        vm_init_e: Optional (n_excite,) array of initial membrane potentials in mV.
+            If None, vm is drawn randomly (original behavior). Supplying a fixed
+            array makes the trial fully deterministic given fixed input spikes.
+        vm_init_i: Optional (n_inhib,) array of initial membrane potentials in mV.
 
     Returns:
         True if successful
@@ -190,9 +204,17 @@ def run_single_trial(n_excite, n_inhib, input_conn, recur_conn, inputs,
     e_neurons.I_inj = I_inj_val
     i_neurons.I_inj = I_inj_val
 
-    # Initial membrane potentials
-    e_neurons.vm = 'rand()*10*mV - 70*mV'
-    i_neurons.vm = 'rand()*10*mV - 70*mV'
+    # Initial membrane potentials. A precomputed array (in mV) makes the trial
+    # fully deterministic given fixed input spikes; otherwise draw randomly as
+    # before (~U(-70, -60) mV).
+    if vm_init_e is not None:
+        e_neurons.vm = np.asarray(vm_init_e) * mV
+    else:
+        e_neurons.vm = 'rand()*10*mV - 70*mV'
+    if vm_init_i is not None:
+        i_neurons.vm = np.asarray(vm_init_i) * mV
+    else:
+        i_neurons.vm = 'rand()*10*mV - 70*mV'
 
     # Recurrent synapses
     ee_slice = recur_conn[:n_excite, :n_excite]

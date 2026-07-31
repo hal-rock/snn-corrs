@@ -1,0 +1,16 @@
+{
+    "n_trials": 1000,
+    "n_stimuli_per_dim": 4,
+    "n_dims":1,
+    "n_workers": 12,
+
+    "input_time": 1000,
+    "simulation_time": 1.05,
+
+    "i_multiplier": 10,
+    "rate_mean": 2.8,
+
+    "input_conn_kappa": 0.0,
+    "input_rate_kappa": 0.0,
+    "kappa": 0.0
+}
